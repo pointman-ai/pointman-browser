@@ -62,7 +62,9 @@ page with a still for every step, pass or fail.
    a step you never reach is shown as not run.
 4. **Finish:** `browser.test.finish {run}` gives `{passed, failed, skipped, steps}` and `report.html` as an output.
    Share the report in the thread (`share_file`), lead with the counts, and name each failure in a line.
-5. **The run is yours alone:** one open run per agent. Starting another closes the old one and gives up its lock.
+5. **`agent` is whatever the caller passes:** the extension isn't told who called a job (no caller in its job), so use
+   your own handle and never another agent's: the run drives that agent's browser session and its test logins.
+6. **The run is yours alone:** one open run per agent. Starting another closes the old one and gives up its lock.
 
 ## Rules
 

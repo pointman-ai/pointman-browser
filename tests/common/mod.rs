@@ -169,7 +169,16 @@ pub fn calls_in(log: &Path) -> Vec<FakeCall> {
 
 /// The extension under the stand-in, with the fake as its CLI and `settings`.
 pub fn node(fake: &Fake, settings: Value) -> StandIn {
+    let home = tempfile::tempdir().unwrap();
+    let node = node_in(fake, settings, home.path());
+    std::mem::forget(home);
+    node
+}
+
+/// The same, with `home` as the machine person's home (where `~/lane/heavy.sh` would be).
+pub fn node_in(fake: &Fake, settings: Value, home: &std::path::Path) -> StandIn {
     StandIn::new(ROOT)
+        .env("HOME", home.to_str().unwrap())
         .binary(env!("CARGO_BIN_EXE_browser"))
         .settings(settings)
         .machine("testbox")

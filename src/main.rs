@@ -454,6 +454,12 @@ fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
 
     let id = format!("run-{}-{}", now(), x.counter.fetch_add(1, Ordering::SeqCst) + 1);
     let mut run = test::new_run(&id, name, &agent, &x.h.machine(), now(), &steps);
+    if x.lane().is_none() {
+        // a machine that has the lane script but no `lock` setting would run beside other jobs without anyone noticing
+        if let Some(p) = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("lane/heavy.sh")).filter(|p| p.is_file()) {
+            bail!("this machine has a heavy-job lock at {} but the `lock` setting is empty: set `lock` to it, so a run holds its lane", p.display());
+        }
+    }
     if let Some(script) = x.lane() {
         job.progress(None, "waiting for the heavy-job lane");
         x.take_lane(&script, &agent, &lane_job(name), &|| job.cancelled())?;
@@ -625,6 +631,7 @@ fn test_step(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     step["ok"] = json!(ok);
     step["note"] = note.map_or(Value::Null, Value::String);
     step["shot_file"] = shot.as_ref().map_or(Value::Null, |p| json!(name_of(p)));
+    step["shot_error"] = if shot.is_some() { Value::Null } else { shot_error.clone().map_or(Value::Null, Value::String) };
     save_run(&dir, &run)?;
 
     if let Some(p) = &shot {

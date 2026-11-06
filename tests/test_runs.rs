@@ -157,3 +157,18 @@ fn no_lock_setting_no_lane() {
     let done = node.run("browser.test.finish", json!({"run": run})).unwrap();
     assert_eq!(done.result["failed"], 0);
 }
+
+#[test]
+fn a_lane_script_without_the_lock_setting_refuses_the_run() {
+    let fake = Fake::new();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join("lane")).unwrap();
+    std::fs::write(home.path().join("lane/heavy.sh"), "exit 0\n").unwrap();
+    let node = node_in(&fake, json!({}), home.path());
+    let err = node
+        .run("browser.test.start", json!({"name": "x", "checklist": "- one\n", "agent": "patchbay"}))
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+    assert!(err.contains("`lock` setting is empty"), "{err}");
+}
