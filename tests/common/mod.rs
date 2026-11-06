@@ -39,8 +39,10 @@ case "$1" in
   click) echo '{"success":false,"data":null,"error":"Element not found: '"$2"'"}'; exit 1;;
   screenshot)
     mkdir -p "$here/shots"
-    if [ -n "$2" ]; then printf 'PNGFILE' > "$2"; echo '{"success":true,"data":{"path":"'"$2"'"},"error":null}'
-    else printf 'PNGDATA' > "$here/shots/abc.png"; echo '{"success":true,"data":{"path":"'"$here"'/shots/abc.png"},"error":null}'; fi;;
+    if [ -f "$here/no-browser" ]; then echo '{"success":false,"data":null,"error":"No page open"}'; exit 1; fi
+    if [ -n "$2" ]; then printf '\211PNG\r\n\032\nFILE' > "$2"; echo '{"success":true,"data":{"path":"'"$2"'"},"error":null}'
+    else printf '\211PNG\r\n\032\nDATA' > "$here/shots/abc.png"; echo '{"success":true,"data":{"path":"'"$here"'/shots/abc.png"},"error":null}'; fi;;
+  get) echo '{"success":true,"data":{"url":"https://staging.example/"},"error":null}';;
   session) echo '{"success":true,"data":{"sessions":["patchbay","deskprobe"]}}';;
   wait) sleep "$2"; echo '{"success":true,"data":{},"error":null}';;
   crash) echo "thread 'main' panicked" >&2; exit 101;;
@@ -60,6 +62,26 @@ fn script() -> PathBuf {
             path
         })
         .clone()
+}
+
+/// A fake heavy-job lock script: logs `take`/`release` beside itself; `take` exits 3 the first time (its 9-minute
+/// wait over), then 0.
+pub fn fake_lane(dir: &Path) -> PathBuf {
+    let path = dir.join("heavy.sh");
+    std::fs::write(
+        &path,
+        r#"here=$(dirname "$0")
+echo "$@" >> "$here/lane.log"
+if [ "$1" = take ] && [ ! -f "$here/tried" ]; then touch "$here/tried"; exit 3; fi
+exit 0
+"#,
+    )
+    .unwrap();
+    path
+}
+
+pub fn lane_log(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("lane.log")).unwrap_or_default().lines().map(String::from).collect()
 }
 
 /// One test's fake CLI: its folder (the log) and its path.

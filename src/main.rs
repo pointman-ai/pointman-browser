@@ -6,12 +6,13 @@
 //! person's browser. Each call runs on a thread of its own and can be cancelled: the CLI is killed.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use browser::cli::{self, Call};
-use browser::install;
+use browser::{install, test};
 use pointman_extension::protocol::output_request::Role;
 use pointman_extension::protocol::{HealthCheckRequest, HealthCheckResponse, HealthFixRequest, HealthFixResponse};
 use pointman_extension::v1::health::part::State;
@@ -38,7 +39,19 @@ struct Ext {
     /// The last install's error; held while one runs.
     installing: Mutex<Option<String>>,
     chrome_installing: Mutex<Option<String>>,
+    /// One run's file is written by one call at a time.
+    runs: Mutex<()>,
+    counter: AtomicU64,
 }
+
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// A test run is kept this long after its last step.
+const RUN_DAYS: u64 = 7;
+/// Waiting for the heavy-job lane gives up after this.
+const LANE_WAIT: Duration = Duration::from_secs(30 * 60);
 
 impl Ext {
     fn state(&self) -> PathBuf {
@@ -52,6 +65,52 @@ impl Ext {
 
     fn setting(&self, name: &str, default: bool) -> bool {
         self.h.settings()[name].as_bool().unwrap_or(default)
+    }
+
+    /// The heavy-job lock's script on this machine (the `lock` setting), if it has one: a test run holds its lane.
+    fn lane(&self) -> Option<PathBuf> {
+        self.h.settings()["lock"].as_str().map(str::trim).filter(|p| !p.is_empty()).map(PathBuf::from)
+    }
+
+    /// `sh <script> <verb> <holder> …`, to its end.
+    fn lane_call(
+        &self,
+        script: &Path,
+        args: &[&str],
+        timeout: Duration,
+        cancelled: &dyn Fn() -> bool,
+    ) -> anyhow::Result<cli::Ran> {
+        let mut argv = vec![script.to_string_lossy().to_string()];
+        argv.extend(args.iter().map(|a| a.to_string()));
+        let home = self.home()?;
+        let call = Call { bin: Path::new("sh"), argv: &argv, env: &[], cwd: &home, timeout };
+        cli::run(&call, cancelled)
+    }
+
+    /// Take a lane and keep it until `release_lane`: `take` waits its turn, and after 9 minutes exits 3 and keeps the
+    /// place, so ask again.
+    fn take_lane(&self, script: &Path, holder: &str, job: &str, cancelled: &dyn Fn() -> bool) -> anyhow::Result<()> {
+        let started = std::time::Instant::now();
+        loop {
+            let ran = self.lane_call(script, &["take", holder, job], Duration::from_secs(11 * 60), cancelled)?;
+            if ran.cancelled {
+                let _ = self.release_lane(script, holder);
+                bail!(pointman_extension::Cancelled);
+            }
+            match ran.code {
+                Some(0) => return Ok(()),
+                Some(3) if started.elapsed() < LANE_WAIT => continue,
+                code => bail!(
+                    "the heavy-job lane wasn't free ({}): {}",
+                    code.map_or("no exit code".to_string(), |c| format!("exit {c}")),
+                    cli::clip(String::from_utf8_lossy(&ran.stderr).trim(), 300)
+                ),
+            }
+        }
+    }
+
+    fn release_lane(&self, script: &Path, holder: &str) -> anyhow::Result<()> {
+        self.lane_call(script, &["release", holder], QUICK, &|| false).map(|_| ())
     }
 
     /// The CLI: the pinned release, installed now if it isn't yet. POINTMAN_BROWSER_CLI points the tests at a fake.
@@ -359,6 +418,244 @@ fn version_of(bin: &Path) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
+/// browser.test.start: a run from a checklist, holding the machine's heavy-job lane (where it has one) to `finish`.
+fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
+    let name = job.params["name"].as_str().map(str::trim).filter(|n| !n.is_empty());
+    let name = name.context("name is what the run is called: \"Spacesheep staging: sign in\"")?;
+    let markdown = job.params["checklist"].as_str().context("checklist is markdown: one `- ` line a step")?;
+    let steps = test::parse_checklist(markdown)?;
+    if job.params["agent"].as_str().map(str::trim).unwrap_or_default().is_empty() {
+        bail!("agent is your handle: the run uses your own browser session");
+    }
+    let agent = cli::session_name(job.params["agent"].as_str());
+    let state = x.state();
+    test_prune(&state);
+    // a run this agent left open gives up its lane first
+    let _ = test_abandon(x, &state, &agent);
+
+    let id = format!("run-{}-{}", now(), x.counter.fetch_add(1, Ordering::SeqCst) + 1);
+    let mut run = test::new_run(&id, name, &agent, &x.h.machine(), now(), &steps);
+    if let Some(script) = x.lane() {
+        job.progress(None, "waiting for the heavy-job lane");
+        x.take_lane(&script, &agent, &format!("UI test: {name}"), &|| job.cancelled())?;
+        run["lane"] = json!(script.to_string_lossy());
+    }
+    let dir = test::run_dir(&state, &id);
+    if let Err(e) = private_dir(&dir).and_then(|_| save_run(&dir, &run)) {
+        if let Some(script) = x.lane() {
+            let _ = x.release_lane(&script, &agent);
+        }
+        return Err(e);
+    }
+    let text = format!(
+        "{id}: {} step{} to run{}",
+        steps.len(),
+        if steps.len() == 1 { "" } else { "s" },
+        if run["lane"].is_null() { "" } else { ", holding the heavy-job lane until finish" }
+    );
+    Ok(
+        json!({"ok": true, "run": id, "steps": steps.iter().map(|s| json!({"text": s.text, "expect": s.expect})).collect::<Vec<_>>(), "text": text, "machine": x.h.machine()}),
+    )
+}
+
+fn save_run(dir: &Path, run: &Value) -> anyhow::Result<()> {
+    let tmp = dir.join(".run.json.part");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(run)?)?;
+    std::fs::rename(&tmp, dir.join("run.json"))?;
+    Ok(())
+}
+
+fn load_run(state: &Path, id: &str) -> anyhow::Result<(PathBuf, Value)> {
+    if !test::valid_run_id(id) {
+        bail!("run is the id browser.test.start gave: run-<number>-<number>");
+    }
+    let dir = test::run_dir(state, id);
+    let text = std::fs::read_to_string(dir.join("run.json"))
+        .with_context(|| format!("no run {id} here: start one with browser.test.start (on this machine)"))?;
+    Ok((dir.clone(), serde_json::from_str(&text).with_context(|| format!("{id}'s record is damaged"))?))
+}
+
+/// An unfinished run of `agent`'s is closed, and its lane let go.
+fn test_abandon(x: &Ext, state: &Path, agent: &str) -> anyhow::Result<()> {
+    let Ok(entries) = std::fs::read_dir(state.join("runs")) else { return Ok(()) };
+    for e in entries.flatten() {
+        let Some(id) = e.file_name().to_str().map(String::from) else { continue };
+        let Ok((dir, mut run)) = load_run(state, &id) else { continue };
+        if run["agent"] == agent && run["finished"].is_null() {
+            if let Some(script) = run["lane"].as_str() {
+                let _ = x.release_lane(Path::new(script), agent);
+            }
+            run["finished"] = json!(now());
+            run["lane"] = Value::Null;
+            run["abandoned"] = json!(true);
+            save_run(&dir, &run)?;
+            x.h.log(format!("closed {id}, left open by {agent}"));
+        }
+    }
+    Ok(())
+}
+
+/// Runs untouched for RUN_DAYS go.
+fn test_prune(state: &Path) {
+    let Ok(entries) = std::fs::read_dir(state.join("runs")) else { return };
+    for e in entries.flatten() {
+        let old = e
+            .path()
+            .join("run.json")
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|d| d.as_secs() > RUN_DAYS * 86_400);
+        if old {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// browser.test.step: one step's result, with a still: the agent's browser (default) or a file from elsewhere.
+fn test_step(x: &Ext, job: &Job) -> anyhow::Result<Value> {
+    let id = job.params["run"].as_str().unwrap_or_default().to_string();
+    let n = job.params["step"].as_u64().context("step is the step's number, from 1")? as usize;
+    let ok = job.params["ok"]
+        .as_bool()
+        .context("ok is true or false: did the step do what its line, and its expect, say")?;
+    let note = job.params["note"].as_str().map(str::trim).filter(|n| !n.is_empty()).map(String::from);
+    let want_shot = job.params["shot"].as_bool().unwrap_or(true);
+    let file = job.params["file"].as_str().map(str::trim).filter(|f| !f.is_empty());
+    let state = x.state();
+    let _guard = lock(&x.runs);
+    let (dir, mut run) = load_run(&state, &id)?;
+    if !run["finished"].is_null() {
+        bail!("{id} is finished: start a new run");
+    }
+    let total = run["steps"].as_array().map_or(0, Vec::len);
+    if n == 0 || n > total {
+        bail!("step {n}: this run has steps 1 to {total}");
+    }
+    let agent = run["agent"].as_str().unwrap_or("agent").to_string();
+    std::fs::create_dir_all(&job.work)?;
+
+    let mut shot: Option<PathBuf> = None;
+    let mut shot_error: Option<String> = None;
+    if let Some(f) = file {
+        // a still from somewhere else, such as desktop's screenshot of a Mac app
+        let path = PathBuf::from(f);
+        let meta = std::fs::metadata(&path).with_context(|| format!("file {f}: not there on this machine"))?;
+        if !meta.is_file() || meta.len() > test::STILL_MAX {
+            bail!("file {f}: must be a PNG or JPEG of at most {} MB", test::STILL_MAX / 1024 / 1024);
+        }
+        let head = std::fs::read(&path)?;
+        let mime = test::still_mime(&head).with_context(|| format!("file {f}: not a PNG or JPEG"))?;
+        let to = dir.join(format!("step-{n}.{}", if mime == "image/png" { "png" } else { "jpg" }));
+        std::fs::write(&to, head)?;
+        shot = Some(to);
+    } else if want_shot {
+        let bin = x.cli()?;
+        let home = x.home()?;
+        let to = dir.join(format!("step-{n}.png"));
+        let args = vec!["screenshot".to_string(), to.to_string_lossy().to_string()];
+        match call(x, &bin, &home, &agent, &args, &job.work, Duration::from_secs(60), &|| job.cancelled()) {
+            Ok((env, _)) if env["ok"] == true && to.is_file() => {
+                shot = Some(to);
+                // the page it was on, for the report's lead
+                if run["url"].is_null() {
+                    let url = call(x, &bin, &home, &agent, &["get".into(), "url".into()], &job.work, QUICK, &|| false);
+                    if let Ok((u, _)) = url {
+                        if let Some(u) = u["data"]["url"].as_str().filter(|u| u.starts_with("http")) {
+                            run["url"] = json!(u);
+                        }
+                    }
+                }
+            }
+            Ok((env, _)) => shot_error = Some(cli::summary("screenshot", &env)),
+            Err(e) => shot_error = Some(format!("{e:#}")),
+        }
+    }
+    // a re-recorded step drops a still from before when it has none now
+    for old in ["png", "jpg"] {
+        let p = dir.join(format!("step-{n}.{old}"));
+        if shot.as_ref() != Some(&p) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    let step = &mut run["steps"][n - 1];
+    step["ok"] = json!(ok);
+    step["note"] = note.map_or(Value::Null, Value::String);
+    step["shot_file"] = shot.as_ref().map_or(Value::Null, |p| json!(name_of(p)));
+    save_run(&dir, &run)?;
+
+    if let Some(p) = &shot {
+        let out = job.work.join(format!("{id}-step-{n}.{}", ext(p)));
+        std::fs::copy(p, &out)?;
+        job.output(&out, "image", Role::Main, json!({"file": name_of(&out)}));
+    }
+    let c = test::counts(&run["steps"].as_array().cloned().unwrap_or_default());
+    let text = format!(
+        "step {n} of {total}: {}{}{}",
+        if ok { "passed" } else { "failed" },
+        if shot.is_some() { ", still kept" } else { ", no still" },
+        shot_error.as_ref().map(|e| format!(" ({e})")).unwrap_or_default()
+    );
+    Ok(json!({
+        "ok": true, "run": id, "step": n, "recorded": ok, "shot": shot.is_some(), "shot_error": shot_error,
+        "recorded_so_far": {"passed": c.passed, "failed": c.failed, "left": c.skipped}, "text": text,
+    }))
+}
+
+/// browser.test.finish: report.html with a still for each step, and the counts; the lane let go.
+fn test_finish(x: &Ext, job: &Job) -> anyhow::Result<Value> {
+    let id = job.params["run"].as_str().unwrap_or_default().to_string();
+    let state = x.state();
+    let _guard = lock(&x.runs);
+    let (dir, mut run) = load_run(&state, &id)?;
+    let agent = run["agent"].as_str().unwrap_or("agent").to_string();
+    if run["finished"].is_null() {
+        run["finished"] = json!(now());
+    }
+    let started = run["started"].as_u64().unwrap_or(0);
+    let took = run["finished"].as_u64().unwrap_or(0).saturating_sub(started);
+    // the lane goes first: the report is written from files, and needs no browser
+    if let Some(script) = run["lane"].as_str().map(String::from) {
+        let _ = x.release_lane(Path::new(&script), &agent);
+        run["lane"] = Value::Null;
+    }
+    save_run(&dir, &run)?;
+
+    let mut shown = run.clone();
+    if let Some(obj) = shown.as_object_mut() {
+        obj.remove("lane");
+        obj.remove("abandoned");
+    }
+    for step in shown["steps"].as_array_mut().into_iter().flatten() {
+        let file = step["shot_file"].take();
+        step["shot"] = match file.as_str().map(|f| dir.join(f)) {
+            Some(p) => test::data_url(&p).map(Value::String).unwrap_or(Value::Null),
+            None => Value::Null,
+        };
+        step.as_object_mut().map(|o| o.remove("shot_file"));
+    }
+    let html = test::render(&shown, took);
+    std::fs::create_dir_all(&job.work)?;
+    let path = job.work.join("report.html");
+    std::fs::write(&path, &html)?;
+    job.output(&path, "document", Role::Main, json!({"file": "report.html"}));
+    let steps = shown["steps"].as_array().cloned().unwrap_or_default();
+    let c = test::counts(&steps);
+    let text = format!(
+        "{}: {} passed, {} failed, {} not run, {}",
+        run["name"].as_str().unwrap_or(&id),
+        c.passed,
+        c.failed,
+        c.skipped,
+        test::duration(took)
+    );
+    Ok(json!({
+        "ok": true, "run": id, "passed": c.passed, "failed": c.failed, "skipped": c.skipped, "steps": steps.len(),
+        "report": "report.html", "bytes": html.len(), "took": took, "text": text, "machine": x.h.machine(),
+    }))
+}
+
 fn files_in(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
     let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
@@ -478,7 +775,13 @@ fn fix(x: &Ext, req: &HealthFixRequest) -> anyhow::Result<HealthFixResponse> {
 
 fn main() -> anyhow::Result<()> {
     let mut ext = Extension::new()?;
-    let x = Arc::new(Ext { h: ext.handle(), installing: Mutex::new(None), chrome_installing: Mutex::new(None) });
+    let x = Arc::new(Ext {
+        h: ext.handle(),
+        installing: Mutex::new(None),
+        chrome_installing: Mutex::new(None),
+        runs: Mutex::new(()),
+        counter: AtomicU64::new(0),
+    });
 
     // the pinned CLI and its Chrome are fetched as soon as the extension starts, so the first call doesn't wait
     let xs = x.clone();
@@ -492,7 +795,13 @@ fn main() -> anyhow::Result<()> {
     });
 
     type Cmd = fn(&Ext, &Job) -> anyhow::Result<Value>;
-    let commands: [(&str, Cmd); 2] = [("browser.run", run), ("browser.status", status)];
+    let commands: [(&str, Cmd); 5] = [
+        ("browser.run", run),
+        ("browser.status", status),
+        ("browser.test.start", test_start),
+        ("browser.test.step", test_step),
+        ("browser.test.finish", test_finish),
+    ];
     for (kind, f) in commands {
         let xc = x.clone();
         ext.command(kind, move |job: &Job| f(&xc, job));

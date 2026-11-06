@@ -3,3 +3,4 @@
 
 pub mod cli;
 pub mod install;
+pub mod test;
