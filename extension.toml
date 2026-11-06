@@ -1,0 +1,54 @@
+# agent-browser (github.com/vercel-labs/agent-browser) on Pointman's machines: agents drive a headless Chrome on
+# this machine (open, snapshot, click, type, screenshot), sent from anywhere with create_job(machine=…). A pinned
+# agent-browser release, checked against the sha256 this extension carries, is installed in the extension's state
+# folder, with the Chrome it downloads. Each agent has its own session: its tabs, cookies and refs are its own.
+[extension]
+id = "browser"
+name = "Browser"
+version = "0.1.0"
+publisher = "aurelio"
+summary = "Agents drive a headless browser with agent-browser: open pages, read them, click, type and take screenshots."
+node = ">=0.4.0"
+platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
+
+[run]
+command = ["bin/browser"]
+runtime = "binary"
+
+# guidance for agents on a node with it: the loop, refs, test accounts only, stills as outputs
+[behavior]
+skill = "SKILLS.md"
+
+[permissions]
+network = true                   # agent-browser's pinned release and Chrome, once per version; and the pages agents open
+
+[settings]
+type = "object"
+
+[settings.properties.headed]
+type = "boolean"
+title = "Visible window"
+default = false
+description = "Let agents ask for a visible browser window (--headed) on this machine's screen. Off: headless only."
+
+[settings.properties.chrome]
+type = "string"
+title = "Chrome or Chromium"
+default = ""
+description = "Path to a browser to use instead of the one agent-browser downloads. Needed on NixOS; on Linux a chromium on the PATH is found without it."
+
+[[commands]]
+kind = "browser.run"
+title = "Run agent-browser (args, agent, doing?)"
+params = { type = "object", properties = { args = { type = "array", items = { type = "string" }, description = "The words after `agent-browser`: [\"open\", \"https://example.com\"], then [\"snapshot\", \"-i\", \"-c\"], [\"click\", \"@e1\"], [\"fill\", \"@e2\", \"text\"], [\"screenshot\"]" }, agent = { type = "string", description = "Your handle: your own browser session on this machine is named for it" }, doing = { type = "string", description = "What you're doing, in a few words" }, timeout = { type = "integer", minimum = 1, maximum = 600, default = 60, description = "Seconds before it's stopped" } }, required = ["args", "agent"], additionalProperties = false }
+cancellable = true
+outputs = ["image", "document"]
+slash = "run"
+summary = "Any agent-browser command in your own session: open a page, snapshot it, click, type, screenshot"
+
+[[commands]]
+kind = "browser.status"
+title = "agent-browser here: version, Chrome, sessions"
+params = { type = "object", properties = {}, additionalProperties = false }
+slash = "status"
+summary = "agent-browser's version on this machine, the Chrome it uses, and the open sessions"

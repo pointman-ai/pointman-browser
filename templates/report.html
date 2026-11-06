@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<!--
+  The report of one UI test run (EXT-143), filled by `browser.test.finish`:
+  - {{TITLE}}, {{HEADLINE}}, {{LEAD}}: plain text, HTML-escaped by the extension.
+  - {{PASSED}}, {{FAILED}}, {{SKIPPED}}, {{TOOK}}: the KPI values ({{TOOK}} like "3 min 12 s").
+  - {{NOT_CHECKED}}: <li> items, escaped text inside.
+  - {{RUN_JSON}}: the run, with "</" written as "<\/":
+    {"name", "agent", "machine", "url", "started", "finished",
+     "steps": [{"n": 1, "text": "...", "expect": "..." | null, "ok": true | false | null, "note": "..." | null,
+                "shot": "data:image/png;base64,..." | null}]}
+    ok null means the step was skipped or never reached.
+  Failed steps come first, each with its still. Then every step in order. A still opens full size; ← and → step
+  through them, Esc closes.
+-->
+<style>
+:root{
+  --bg:#fff; --ink:#1b1b22; --ink2:#46464f; --muted:#6a6a73; --line:#e3e3e8; --code:#f6f6f8;
+  --acc:#2563eb; --acc-soft:#e6efff; --link:#1c5cab;
+  --good:#dff3e6; --good-ink:#14612c; --bad:#fbe3e1; --bad-ink:#a3261a; --skip:#eef0f3; --skip-ink:#55585f; --pop:#fff;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#121317; --ink:#e8e9ee; --ink2:#c2c4cc; --muted:#9a9ca6; --line:#2c2e36; --code:#1a1c22;
+    --acc:#7aa7ff; --acc-soft:#1f2a44; --link:#8db4ff;
+    --good:#173324; --good-ink:#7ad69a; --bad:#3a1d1b; --bad-ink:#f19a8f; --skip:#23252c; --skip-ink:#b4b7c0; --pop:#1d1f26;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.6 ui-sans-serif,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+main{max-width:980px;margin:0 auto;padding:0 32px 80px}
+header{padding:40px 0 4px}
+.kicker{font-size:14px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:0 0 8px}
+h1{font-size:36px;line-height:1.15;margin:0 0 12px;letter-spacing:-.01em}
+h2{font-size:25px;line-height:1.25;margin:48px 0 8px}
+p{margin:0 0 12px}
+.lead{font-size:19px;color:var(--ink2);max-width:760px}
+a{color:var(--link)}
+.cap{font-size:14px;color:var(--muted);margin:6px 0 0}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:20px 0 8px}
+.kpi{border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.kpi .v{font-size:30px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+.kpi .l{font-size:14px;color:var(--ink2);margin-top:4px}
+.kpi.bad{background:var(--bad);border-color:transparent}.kpi.bad .v{color:var(--bad-ink)}
+.kpi.good{background:var(--good);border-color:transparent}.kpi.good .v{color:var(--good-ink)}
+/* a result: colour and a sign, never colour alone */
+.res{display:inline-flex;align-items:center;gap:6px;font-size:14px;font-weight:650;border-radius:999px;padding:2px 10px;white-space:nowrap}
+.res.pass{background:var(--good);color:var(--good-ink)}
+.res.fail{background:var(--bad);color:var(--bad-ink)}
+.res.skip{background:var(--skip);color:var(--skip-ink)}
+/* failed steps: each a card with its still */
+.fails{display:grid;gap:16px;margin:14px 0}
+.failcard{border:1px solid var(--line);border-left:4px solid var(--bad-ink);border-radius:8px;padding:14px 16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:16px;align-items:start}
+.failcard h3{font-size:18px;margin:0 0 6px;line-height:1.35}
+.failcard .meta{font-size:15px;color:var(--ink2);margin:0 0 4px}
+.failcard .meta b{color:var(--ink)}
+/* every step */
+ol.all{list-style:none;padding:0;margin:14px 0;display:grid;gap:8px}
+ol.all li{display:grid;grid-template-columns:34px minmax(0,1fr) auto 120px;gap:12px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+ol.all .n{display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--acc-soft);color:var(--acc);font-weight:700;font-size:14px}
+ol.all .t{min-width:0}
+ol.all .t .x{display:block;font-size:14px;color:var(--muted)}
+.shot{display:block;padding:0;border:1px solid var(--line);border-radius:6px;background:var(--code);cursor:zoom-in;overflow:hidden;min-height:44px}
+.shot img{display:block;width:100%;height:auto;object-fit:cover;object-position:top}
+.failcard .shot img{max-height:380px}
+ol.all .shot img{max-height:80px}
+.shot:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+.noshot{font-size:13px;color:var(--muted);text-align:center}
+/* the still, full size */
+dialog{border:0;padding:0;background:transparent;max-width:min(1400px,96vw);width:96vw}
+dialog::backdrop{background:rgba(10,10,14,.82)}
+.big{background:var(--pop);border-radius:10px;padding:12px;display:grid;gap:8px}
+.big img{width:100%;height:auto;border-radius:6px;display:block}
+.big .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:15px}
+.big .bar .grow{flex:1;min-width:0}
+.big button{font:inherit;min-height:44px;min-width:44px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);padding:0 12px;cursor:pointer}
+.big button:focus-visible{outline:3px solid var(--acc)}
+kbd{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;color:var(--ink2)}
+details{border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin:12px 0}
+summary{cursor:pointer;font-weight:600}
+ul.limits{margin:8px 0 0;padding-left:22px}
+@media (max-width:720px){
+  main{padding:0 16px 64px}
+  h1{font-size:28px}
+  .kpis{grid-template-columns:repeat(2,1fr)}
+  .failcard{grid-template-columns:1fr}
+  ol.all li{grid-template-columns:30px minmax(0,1fr) 84px;grid-template-areas:"n t s" "n r s"}
+  ol.all .n{grid-area:n}ol.all .t{grid-area:t}ol.all .r{grid-area:r}ol.all .shot,ol.all .noshot{grid-area:s}
+  ol.all .shot img{max-height:64px}
+  .failcard .shot img{max-height:260px}
+}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <p class="kicker">UI test run</p>
+  <h1>{{HEADLINE}}</h1>
+  <p class="lead">{{LEAD}}</p>
+  <div class="kpis" role="group" aria-label="The run in numbers">
+    <div class="kpi good"><div class="v">{{PASSED}}</div><div class="l">✓ Steps passed</div></div>
+    <div class="kpi bad" id="k-failed"><div class="v">{{FAILED}}</div><div class="l">✗ Steps failed</div></div>
+    <div class="kpi"><div class="v">{{SKIPPED}}</div><div class="l">– Steps not run</div></div>
+    <div class="kpi"><div class="v">{{TOOK}}</div><div class="l">How long it took</div></div>
+  </div>
+</header>
+
+<section id="failed-section">
+  <h2>The failed steps, with what the page showed</h2>
+  <p>Each failed step comes first here, with the still taken at that step and the agent's note.</p>
+  <div class="fails" id="fails"></div>
+</section>
+
+<section>
+  <h2>Every step, in the order the agent ran them</h2>
+  <p>Open a still to see it full size. <kbd>←</kbd> and <kbd>→</kbd> step through them; <kbd>Esc</kbd> closes it.</p>
+  <ol class="all" id="all"></ol>
+  <noscript><p>This report needs JavaScript to list its steps and stills.</p></noscript>
+</section>
+
+<section>
+  <h2>Not checked</h2>
+  <ul class="limits">{{NOT_CHECKED}}</ul>
+</section>
+</main>
+
+<dialog id="big" aria-label="A step's still, full size">
+  <div class="big">
+    <div class="bar"><span class="grow" id="big-cap"></span>
+      <button type="button" id="prev" aria-label="Previous still">←</button>
+      <button type="button" id="next" aria-label="Next still">→</button>
+      <button type="button" id="close" aria-label="Close">Esc</button></div>
+    <img id="big-img" alt="">
+  </div>
+</dialog>
+
+<script type="application/json" id="run">{{RUN_JSON}}</script>
+<script>
+(() => {
+  let run; try { run = JSON.parse(document.getElementById('run').textContent); } catch (e) { return; }
+  const steps = Array.isArray(run.steps) ? run.steps : [], el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
+  const res = s => s.ok === true ? ['pass', '✓ Passed'] : s.ok === false ? ['fail', '✗ Failed'] : ['skip', '– Not run'];
+  const shots = steps.filter(s => s.shot);
+  const thumb = s => { if (!s.shot) return el('span', 'noshot', 'No still'); const b = el('button', 'shot'); b.type = 'button';
+    b.setAttribute('aria-label', 'Step ' + s.n + ': open its still'); const i = el('img'); i.src = s.shot; i.alt = 'Step ' + s.n + ': ' + s.text; i.loading = 'lazy'; b.append(i);
+    b.addEventListener('click', () => open(shots.indexOf(s))); return b; };
+  // the failed steps first
+  const failed = steps.filter(s => s.ok === false), fails = document.getElementById('fails');
+  if (!failed.length) { document.getElementById('failed-section').hidden = true; document.getElementById('k-failed').classList.remove('bad'); }
+  for (const s of failed) {
+    const c = el('article', 'failcard'), w = el('div');
+    w.append(el('h3', null, 'Step ' + s.n + ': ' + s.text));
+    if (s.expect) { const m = el('p', 'meta'); m.append(el('b', null, 'Expected: '), document.createTextNode(s.expect)); w.append(m); }
+    if (s.note) { const m = el('p', 'meta'); m.append(el('b', null, 'Saw: '), document.createTextNode(s.note)); w.append(m); }
+    c.append(w, thumb(s)); fails.append(c);
+  }
+  // every step
+  const all = document.getElementById('all');
+  for (const s of steps) {
+    const li = el('li'), [cls, word] = res(s), t = el('div', 't');
+    t.append(document.createTextNode(s.text)); if (s.note && s.ok !== false) t.append(el('span', 'x', s.note));
+    const r = el('span', 'r'); r.append(el('span', 'res ' + cls, word));
+    li.append(el('span', 'n', String(s.n)), t, r, thumb(s)); all.append(li);
+  }
+  // the still, full size: ←/→ through every step that has one, Esc closes (the dialog's own)
+  const dlg = document.getElementById('big'), img = document.getElementById('big-img'), cap = document.getElementById('big-cap'); let at = 0;
+  function open(k) { if (k < 0 || !shots.length) return; at = (k + shots.length) % shots.length; const s = shots[at], [, word] = res(s);
+    img.src = s.shot; img.alt = 'Step ' + s.n + ': ' + s.text; cap.textContent = 'Step ' + s.n + ' · ' + word + ' · ' + s.text; if (!dlg.open) dlg.showModal(); }
+  document.getElementById('prev').addEventListener('click', () => open(at - 1));
+  document.getElementById('next').addEventListener('click', () => open(at + 1));
+  document.getElementById('close').addEventListener('click', () => dlg.close());
+  dlg.addEventListener('keydown', e => { if (e.key === 'ArrowLeft') { e.preventDefault(); open(at - 1); } else if (e.key === 'ArrowRight') { e.preventDefault(); open(at + 1); } });
+  dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+})();
+</script>
+</body>
+</html>
