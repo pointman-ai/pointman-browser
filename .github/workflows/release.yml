@@ -8,7 +8,7 @@
 # each platform in `platforms`; one missing is refused.
 #
 # Linux builds are musl, so static: they run on any distribution, NixOS included, whose loader
-# isn't where a glibc build looks for it. Both Macs build on macos-14, the Intel one cross-compiled
+# isn't where a glibc build looks for it. Both Macs build on macos-15, the Intel one cross-compiled
 # (GitHub retired its macos-13 runners), so that's the one build whose tests don't run.
 name: release
 on:
@@ -27,8 +27,8 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          - { platform: macos-arm64, runner: macos-14, target: aarch64-apple-darwin, test: true }
-          - { platform: macos-x86_64, runner: macos-14, target: x86_64-apple-darwin, test: false }
+          - { platform: macos-arm64, runner: macos-15, target: aarch64-apple-darwin, test: true }
+          - { platform: macos-x86_64, runner: macos-15, target: x86_64-apple-darwin, test: false }
           - { platform: linux-x86_64, runner: ubuntu-24.04, target: x86_64-unknown-linux-musl, test: true }
           - { platform: linux-arm64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, test: true }
     runs-on: ${{ matrix.runner }}

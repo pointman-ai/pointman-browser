@@ -64,6 +64,16 @@ fn a_persons_browser_and_other_sessions_are_refused() {
         json!(["--session", "someone-else", "snapshot"]),
         json!(["profiles"]),
         json!(["connect", "9222"]),
+        json!(["open", "file:///etc/passwd"]),
+        json!(["upload", "@e1", "/etc/passwd"]),
+        json!(["clipboard", "read"]),
+        json!(["close", "--all"]),
+        json!(["wait", "--download", "/tmp/x"]),
+        json!(["screenshot", "/Users/someone/Desktop/a.png"]),
+        json!(["screenshot", "../a.png"]),
+        json!(["screenshot", "/Users/someone/.zshrc"]),
+        json!(["screenshot", "../../../.zshrc"]),
+        json!(["open", "https://x.test", "--allow-file-access"]),
     ] {
         let e = node.run("browser.run", json!({"args": args, "agent": "a"})).unwrap_err().to_string();
         assert!(e.contains("isn't allowed"), "{args}: {e}");
@@ -78,6 +88,12 @@ fn a_visible_window_only_where_its_allowed() {
     let e = off.run("browser.run", json!({"args": ["--headed", "open", "https://x.test"], "agent": "a"})).unwrap_err();
     assert!(e.to_string().contains("off on testbox"), "{e}");
     assert!(fake.calls().is_empty());
+    for spelled in
+        [json!(["--headed=true", "open", "https://x.test"]), json!(["open", "https://x.test", "--headed", "true"])]
+    {
+        let e = off.run("browser.run", json!({"args": spelled, "agent": "a"})).unwrap_err().to_string();
+        assert!(e.contains("visible browser window is off"), "{spelled}: {e}");
+    }
     let on = common::node(&fake, json!({"headed": true}));
     on.run("browser.run", json!({"args": ["--headed", "open", "https://x.test"], "agent": "a"})).unwrap();
     assert!(fake.calls_of("open")[0].args.contains(&"--headed".to_string()));
@@ -91,7 +107,7 @@ fn a_screenshot_is_posted_not_answered() {
     assert_eq!(done.result["data"]["file"], "screenshot-1.png");
     assert_eq!(done.outputs.len(), 1);
     assert_eq!(done.outputs[0].kind, "image");
-    assert_eq!(std::fs::read(&done.outputs[0].path).unwrap(), b"PNGDATA");
+    assert!(std::fs::read(&done.outputs[0].path).unwrap().ends_with(b"DATA"));
     assert!(done.result["text"].as_str().unwrap().ends_with("posted screenshot-1.png"));
 
     let to_file = node.run("browser.run", json!({"args": ["screenshot", "out.png"], "agent": "a"})).unwrap();
@@ -103,8 +119,8 @@ fn a_screenshot_is_posted_not_answered() {
 fn a_huge_answer_goes_back_as_a_file() {
     let fake = Fake::new();
     let node = node(&fake, json!({}));
-    let done = node.run("browser.run", json!({"args": ["big"], "agent": "a"})).unwrap();
-    assert_eq!(done.result["data"]["file"], "big.json");
+    let done = node.run("browser.run", json!({"args": ["eval", "big"], "agent": "a"})).unwrap();
+    assert_eq!(done.result["data"]["file"], "eval.json");
     assert!(done.result.to_string().len() < 2000);
     assert_eq!(done.outputs[0].kind, "document");
 }
@@ -117,7 +133,7 @@ fn errors_are_answers_and_crashes_are_failures() {
     assert_eq!(done.result["ok"], false);
     assert_eq!(done.result["error"]["message"], "Element not found: @nope");
     assert_eq!(done.result["text"], "click: Element not found: @nope");
-    let e = node.run("browser.run", json!({"args": ["crash"], "agent": "a"})).unwrap_err().to_string();
+    let e = node.run("browser.run", json!({"args": ["eval", "crash"], "agent": "a"})).unwrap_err().to_string();
     assert!(e.contains("without its JSON (exit 101)") && e.contains("panicked"), "{e}");
     let e = node.run("browser.run", json!({"args": [], "agent": "a"})).unwrap_err().to_string();
     assert!(e.contains("args is empty"), "{e}");
@@ -157,4 +173,15 @@ fn status_and_health_say_what_is_here() {
     assert!(s.result["text"].as_str().unwrap().starts_with("agent-browser 9.9.9 on testbox"), "{}", s.result["text"]);
     assert_eq!(part(&node, "cli")["state"], "STATE_OK");
     assert_eq!(part(&node, "chrome")["state"], "STATE_OK");
+}
+
+#[test]
+fn a_handle_with_nothing_left_has_no_session() {
+    let fake = Fake::new();
+    let node = node(&fake, json!({}));
+    for agent in ["@", "///", " ", ""] {
+        let e = node.run("browser.run", json!({"args": ["snapshot"], "agent": agent})).unwrap_err().to_string();
+        assert!(e.contains("agent is your handle"), "{agent:?}: {e}");
+    }
+    assert!(fake.calls().is_empty(), "nothing ran");
 }

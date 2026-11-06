@@ -35,15 +35,20 @@ set -- $words
 case "$1" in
   open) echo '{"success":true,"data":{"title":"Example Domain","url":"'"$2"'"},"error":null}';;
   snapshot) echo '{"success":true,"data":{"origin":"https://example.com/","refs":{"e1":{"name":"Learn more","role":"link"}},"snapshot":"- link \"Learn more\" [ref=e1]"},"error":null}';;
-  big) printf '{"success":true,"data":{"pad":"%s"},"error":null}\n' "$(head -c 700000 /dev/zero | tr '\0' 'x')";;
+  eval) case "$2" in
+    big) printf '{"success":true,"data":{"pad":"%s"},"error":null}\n' "$(head -c 700000 /dev/zero | tr '\0' 'x')";;
+      crash) echo "thread 'main' panicked" >&2; exit 101;;
+    *) echo '{"success":true,"data":{"result":"ok"},"error":null}';;
+  esac;;
   click) echo '{"success":false,"data":null,"error":"Element not found: '"$2"'"}'; exit 1;;
   screenshot)
     mkdir -p "$here/shots"
-    if [ -n "$2" ]; then printf 'PNGFILE' > "$2"; echo '{"success":true,"data":{"path":"'"$2"'"},"error":null}'
-    else printf 'PNGDATA' > "$here/shots/abc.png"; echo '{"success":true,"data":{"path":"'"$here"'/shots/abc.png"},"error":null}'; fi;;
+    if [ -f "$here/no-browser" ]; then echo '{"success":false,"data":null,"error":"No page open"}'; exit 1; fi
+    if [ -n "$2" ]; then printf '\211PNG\r\n\032\nFILE' > "$2"; echo '{"success":true,"data":{"path":"'"$2"'"},"error":null}'
+    else printf '\211PNG\r\n\032\nDATA' > "$here/shots/abc.png"; echo '{"success":true,"data":{"path":"'"$here"'/shots/abc.png"},"error":null}'; fi;;
+  get) echo '{"success":true,"data":{"url":"https://staging.example/"},"error":null}';;
   session) echo '{"success":true,"data":{"sessions":["patchbay","deskprobe"]}}';;
   wait) sleep "$2"; echo '{"success":true,"data":{},"error":null}';;
-  crash) echo "thread 'main' panicked" >&2; exit 101;;
   *) echo '{"success":false,"data":null,"error":"unknown command"}'; exit 2;;
 esac
 "#;
@@ -60,6 +65,26 @@ fn script() -> PathBuf {
             path
         })
         .clone()
+}
+
+/// A fake heavy-job lock script: logs `take`/`release` beside itself; `take` exits 3 the first time (its 9-minute
+/// wait over), then 0.
+pub fn fake_lane(dir: &Path) -> PathBuf {
+    let path = dir.join("heavy.sh");
+    std::fs::write(
+        &path,
+        r#"here=$(dirname "$0")
+echo "$@" >> "$here/lane.log"
+if [ "$1" = take ] && [ ! -f "$here/tried" ]; then touch "$here/tried"; exit 3; fi
+exit 0
+"#,
+    )
+    .unwrap();
+    path
+}
+
+pub fn lane_log(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("lane.log")).unwrap_or_default().lines().map(String::from).collect()
 }
 
 /// One test's fake CLI: its folder (the log) and its path.
@@ -147,7 +172,17 @@ pub fn calls_in(log: &Path) -> Vec<FakeCall> {
 
 /// The extension under the stand-in, with the fake as its CLI and `settings`.
 pub fn node(fake: &Fake, settings: Value) -> StandIn {
+    let home = tempfile::tempdir().unwrap();
+    let node = node_in(fake, settings, home.path());
+    std::mem::forget(home);
+    node
+}
+
+/// The same, with `home` as the machine person's home (where `~/lane/heavy.sh` would be).
+pub fn node_in(fake: &Fake, settings: Value, home: &std::path::Path) -> StandIn {
     StandIn::new(ROOT)
+        .env("HOME", home.to_str().unwrap())
+        .roots([fake.dir.path().to_path_buf()])
         .binary(env!("CARGO_BIN_EXE_browser"))
         .settings(settings)
         .machine("testbox")

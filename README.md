@@ -31,11 +31,20 @@ GitHub releases (Linux: the static musl builds). Before it is used, it's checked
 |---|---|---|
 | `browser.run` | `args`, `agent`, `doing?`, `timeout?` | `agent-browser --session <agent> --json <args>`, headless; the JSON back with `ok`, `text` and `machine` |
 | `browser.status` | | agent-browser's version, the Chrome it uses, and the open sessions |
+| `browser.test.start` | `name`, `checklist`, `agent` | A run from a markdown checklist (one `- ` line a step, an optional `expect:` under it); `{run}` back. Holds the machine's heavy-job lane, if the `lock` setting names a script |
+| `browser.test.step` | `run`, `step`, `ok`, `note?`, `shot?`, `file?` | One step's result, with a still of the agent's browser session, or of `file` (a PNG or JPEG) |
+| `browser.test.finish` | `run` | `report.html` (from `templates/report.html`, one still a step, failures first) as an output, with `{passed, failed, skipped, steps}`; lets go of the lane |
+
+A run is kept in the extension's state folder (`runs/<id>/`) for a week. A run an agent leaves open is closed, and its
+lane let go, when that agent starts another.
 
 - **Errors are answers.** A missing element or failed click comes back as `ok: false` with `error.message`. The job
   only fails when agent-browser can't run, crashes, times out, or the call isn't allowed.
-- **Refused:** `--profile`, `--auto-connect`, `--cdp`, `--session`, `--state`, `profiles`, `connect` and others
-  that reach a person's browser or another agent's session. `--headed` needs the "Visible window" setting.
+- **An allowlist, not a denylist:** only open, snapshot, click, dblclick, fill, type, press, keyboard, hover, focus,
+  select, check, uncheck, scroll, scrollintoview, wait, get (not `cdp-url`), is, find, tab, back, forward, reload,
+  screenshot, eval, close (not `--all`), console, errors, highlight and mouse, with the flags they take. Anything
+  else, including what a later agent-browser adds, is refused. `file:`, `chrome:`, `javascript:` and `data:` URLs are
+  refused, and a screenshot's path must be inside the job's own folder. `--headed` needs the "Visible window" setting.
 - **Screenshots are posted.** A `screenshot` comes back as a PNG output, and the answer names the file.
 
 ## Development

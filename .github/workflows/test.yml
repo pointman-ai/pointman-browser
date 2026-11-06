@@ -4,7 +4,7 @@ jobs:
   test:
     strategy:
       matrix:
-        runner: [ubuntu-24.04, macos-14]
+        runner: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4

@@ -37,6 +37,12 @@ title = "Chrome or Chromium"
 default = ""
 description = "Path to a browser to use instead of the one agent-browser downloads. Needed on NixOS; on Linux a chromium on the PATH is found without it."
 
+[settings.properties.lock]
+type = "string"
+title = "Heavy-job lock script"
+default = ""
+description = "A script (like ~/lane/heavy.sh) with `take <holder> <job>` and `release <holder>`. A test run holds the machine's heavy-job lane from browser.test.start to browser.test.finish. Empty: no lock."
+
 [[commands]]
 kind = "browser.run"
 title = "Run agent-browser (args, agent, doing?)"
@@ -52,3 +58,28 @@ title = "agent-browser here: version, Chrome, sessions"
 params = { type = "object", properties = {}, additionalProperties = false }
 slash = "status"
 summary = "agent-browser's version on this machine, the Chrome it uses, and the open sessions"
+
+[[commands]]
+kind = "browser.test.start"
+title = "Start a UI test run (name, checklist, agent)"
+params = { type = "object", properties = { name = { type = "string", description = "What the run is called: \"Spacesheep staging: sign in\"" }, checklist = { type = "string", description = "Markdown: one step per `- ` line, with an optional indented `expect: …` line under a step" }, agent = { type = "string", description = "Your handle: the run uses your browser session on this machine" } }, required = ["name", "checklist", "agent"], additionalProperties = false }
+cancellable = true
+slash = "test-start"
+summary = "Start a checklist run on this machine; holds its heavy-job lane until test.finish"
+
+[[commands]]
+kind = "browser.test.step"
+title = "Record one step of a run (run, step, ok, note?)"
+params = { type = "object", properties = { run = { type = "string", description = "The id browser.test.start gave" }, step = { type = "integer", minimum = 1, description = "The step's number in the checklist, from 1" }, ok = { type = "boolean", description = "Did the step do what its line and its expect say" }, note = { type = "string", description = "What you saw, in a sentence; for a failure, what went wrong" }, shot = { type = "boolean", default = true, description = "Take a still of your browser session now" }, file = { type = "string", description = "A PNG or JPEG on this machine to use as the still instead, such as desktop's screenshot of a Mac app" } }, required = ["run", "step", "ok"], additionalProperties = false }
+cancellable = true
+outputs = ["image"]
+slash = "test-step"
+summary = "Record a step's result with a still of the browser, or of a file you give"
+
+[[commands]]
+kind = "browser.test.finish"
+title = "Finish a run and make its report (run)"
+params = { type = "object", properties = { run = { type = "string", description = "The id browser.test.start gave" } }, required = ["run"], additionalProperties = false }
+outputs = ["document"]
+slash = "test-finish"
+summary = "Write report.html, a still for every step, pass or fail; let go of the heavy-job lane"

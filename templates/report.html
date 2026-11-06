@@ -12,7 +12,7 @@
   - {{RUN_JSON}}: the run, with "</" written as "<\/":
     {"name", "agent", "machine", "url", "started", "finished",
      "steps": [{"n": 1, "text": "...", "expect": "..." | null, "ok": true | false | null, "note": "..." | null,
-                "shot": "data:image/png;base64,..." | null}]}
+                "shot": "data:image/png;base64,..." | null, "shot_error": "why there is no still" | null}]}
     ok null means the step was skipped or never reached.
   Failed steps come first, each with its still. Then every step in order. A still opens full size; ← and → step
   through them, Esc closes.
@@ -145,7 +145,7 @@ ul.limits{margin:8px 0 0;padding-left:22px}
   const steps = Array.isArray(run.steps) ? run.steps : [], el = (t, cls, txt) => { const e = document.createElement(t); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
   const res = s => s.ok === true ? ['pass', '✓ Passed'] : s.ok === false ? ['fail', '✗ Failed'] : ['skip', '– Not run'];
   const shots = steps.filter(s => s.shot);
-  const thumb = s => { if (!s.shot) return el('span', 'noshot', 'No still'); const b = el('button', 'shot'); b.type = 'button';
+  const thumb = s => { if (!s.shot) return el('span', 'noshot', s.shot_error ? 'No still: ' + s.shot_error : 'No still'); const b = el('button', 'shot'); b.type = 'button';
     b.setAttribute('aria-label', 'Step ' + s.n + ': open its still'); const i = el('img'); i.src = s.shot; i.alt = 'Step ' + s.n + ': ' + s.text; i.loading = 'lazy'; b.append(i);
     b.addEventListener('click', () => open(shots.indexOf(s))); return b; };
   // the failed steps first
