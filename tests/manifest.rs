@@ -11,7 +11,13 @@ fn the_manifest_keeps_to_cores_limits() {
     assert!((1..=60).contains(&chars(&ext["name"])) && (1..=200).contains(&chars(&ext["summary"])));
     for c in m["commands"].as_array().unwrap() {
         let kind = c["kind"].as_str().unwrap();
-        assert!(kind.starts_with("browser."), "{kind}");
+        // core's rule: the extension's id, one dot, then [a-z][a-z0-9_]* (manifest.py)
+        let verb = kind.strip_prefix("browser.").unwrap_or_else(|| panic!("{kind} must start with browser."));
+        assert!(
+            verb.starts_with(|ch: char| ch.is_ascii_lowercase())
+                && verb.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'),
+            "command '{kind}' must be browser.<verb>, with one dot and the verb in [a-z][a-z0-9_]*"
+        );
         assert!((1..=60).contains(&chars(&c["title"])), "{kind}'s title is {} characters", chars(&c["title"]));
         assert!(chars(&c["summary"]) <= 120, "{kind}'s summary is {} characters", chars(&c["summary"]));
         let slash = c["slash"].as_str().unwrap();

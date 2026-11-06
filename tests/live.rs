@@ -39,24 +39,24 @@ fn reports_a_real_run() {
     let run = |args: serde_json::Value| node.run("browser.run", json!({"args": args, "agent": "live-test"})).unwrap();
     let start = node
         .run(
-            "browser.test.start",
+            "browser.test_start",
             json!({"name": "example.com", "agent": "live-test",
             "checklist": "- Open the page\n  expect: the title is Example Domain\n- Find the Learn more link\n  expect: a link named Learn more\n- Find a Sign in button\n  expect: a Sign in button"}),
         )
         .unwrap();
     let id = start.result["run"].as_str().unwrap().to_string();
     run(json!(["open", "https://example.com"]));
-    node.run("browser.test.step", json!({"run": id, "step": 1, "ok": true, "note": "Title: Example Domain"})).unwrap();
+    node.run("browser.test_step", json!({"run": id, "step": 1, "ok": true, "note": "Title: Example Domain"})).unwrap();
     let snap = run(json!(["snapshot", "-i", "-c"]));
     let has_link = snap.result["data"]["snapshot"].as_str().unwrap_or("").contains("Learn more");
     node.run(
-        "browser.test.step",
+        "browser.test_step",
         json!({"run": id, "step": 2, "ok": has_link, "note": "link Learn more in the snapshot"}),
     )
     .unwrap();
-    node.run("browser.test.step", json!({"run": id, "step": 3, "ok": false, "note": "The page has no Sign in button"}))
+    node.run("browser.test_step", json!({"run": id, "step": 3, "ok": false, "note": "The page has no Sign in button"}))
         .unwrap();
-    let done = node.run("browser.test.finish", json!({"run": id})).unwrap();
+    let done = node.run("browser.test_finish", json!({"run": id})).unwrap();
     println!("{}", done.result["text"]);
     let report = done.outputs.iter().find(|o| o.kind == "document").unwrap();
     let to = std::env::var("REPORT_OUT").unwrap_or_else(|_| "/tmp/browser-report.html".into());
