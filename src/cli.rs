@@ -116,6 +116,27 @@ impl Pipe {
     }
 }
 
+/// The most a number may be in a Pointman answer: core refuses any number past ±2^53.
+const MAX_WHOLE: u64 = 1 << 53;
+
+/// Numbers past ±2^53 (agent-browser's `launchHash` is a random u64) become strings: Pointman's core refuses the
+/// whole job answer with a 400 otherwise.
+pub fn stringify_big_numbers(v: &mut Value) {
+    match v {
+        Value::Number(n)
+            if n.as_i64()
+                .map(|i| i.unsigned_abs() > MAX_WHOLE)
+                .or(n.as_u64().map(|u| u > MAX_WHOLE))
+                .unwrap_or_else(|| n.as_f64().is_some_and(|f| f.abs() > MAX_WHOLE as f64)) =>
+        {
+            *v = Value::String(n.to_string())
+        }
+        Value::Array(a) => a.iter_mut().for_each(stringify_big_numbers),
+        Value::Object(o) => o.values_mut().for_each(stringify_big_numbers),
+        _ => {}
+    }
+}
+
 /// The envelope it printed with `--json`: `{success, data, error}`, where `error` is a message. It's returned with
 /// `ok` beside `success` (the shape every Pointman CLI extension answers in), and `error` as `{message}` so an
 /// agent branches on `error.message` the way it does for `desktop`. None means it crashed or timed out.
@@ -129,6 +150,7 @@ pub fn envelope(ran: &Ran) -> anyhow::Result<Value> {
         Ok(mut v) if v.get("success").is_some_and(Value::is_boolean) => {
             let ok = v["success"].as_bool().unwrap_or(false);
             v["ok"] = Value::Bool(ok);
+            stringify_big_numbers(&mut v);
             if let Some(msg) = v["error"].as_str().map(String::from) {
                 v["error"] = serde_json::json!({ "message": msg });
             }
@@ -595,6 +617,36 @@ mod tests {
         for no in [&["open", "x"][..], &["--headed=false", "open", "x"], &["--headed", "false", "open", "x"]] {
             assert!(!wants_headed(&words(no)), "{no:?}");
         }
+    }
+
+    #[test]
+    fn numbers_past_signed_64_bits_become_strings() {
+        let ran = Ran {
+            code: Some(0),
+            stdout: br#"{"success":true,"data":{"lifecycle":{"effectiveLaunch":{"launchHash":11677035664275010974,"n":5}}},"error":null}"#.to_vec(),
+            ..Default::default()
+        };
+        let env = envelope(&ran).unwrap();
+        assert_eq!(env["data"]["lifecycle"]["effectiveLaunch"]["launchHash"], "11677035664275010974");
+        assert_eq!(env["data"]["lifecycle"]["effectiveLaunch"]["n"], 5);
+    }
+
+    #[test]
+    fn numbers_past_2_pow_53_become_strings_and_the_rest_stay() {
+        let ran = Ran {
+            code: Some(0),
+            stdout: br#"{"success":true,"data":{"a":9007199254740993,"b":-9007199254740993,"c":9007199254740992,"d":-9007199254740992,"e":9223372036854775807,"f":-9223372036854775808,"g":1.5,"h":1e20}}"#.to_vec(),
+            ..Default::default()
+        };
+        let d = &envelope(&ran).unwrap()["data"];
+        assert_eq!(d["a"], "9007199254740993");
+        assert_eq!(d["b"], "-9007199254740993");
+        assert_eq!(d["c"], 9007199254740992u64);
+        assert_eq!(d["d"], -9007199254740992i64);
+        assert_eq!(d["e"], "9223372036854775807");
+        assert_eq!(d["f"], "-9223372036854775808");
+        assert_eq!(d["g"], 1.5);
+        assert!(d["h"].is_string(), "{}", d["h"]);
     }
 
     #[test]

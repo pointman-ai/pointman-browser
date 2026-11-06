@@ -1,6 +1,6 @@
 [package]
 name = "browser"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "agent-browser on Pointman's machines: agents drive a headless browser, each in its own session."
 license = "MIT"
