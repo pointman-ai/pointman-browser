@@ -70,8 +70,9 @@ page with a still for every step, pass or fail.
 
 - **Your own session.** The extension names it for the `agent` you pass: always pass your handle. You can't use
   another's session or `--session`.
-- **Test accounts only.** Never a person's browser, profile or cookies: `--profile`, `--auto-connect`, `--cdp` and
-  `profiles` are refused. Log in with a test account made for agents, and take its password from the vault
+- **Test accounts only.** Never a person's browser, profile or cookies: only the common browsing commands and
+  their flags are allowed (see the README); `--profile`, `--cdp`, `file:` URLs, `upload`, `cookies` and the rest are
+  refused, and a screenshot's path must be inside the job's folder. Log in with a test account made for agents, and take its password from the vault
   (`use_secret`); never type a real person's login, and never print a secret or put it in a post.
 - **Headless.** `--headed` (a visible window on the machine's screen) works only where the machine's person has
   turned on "Visible window".

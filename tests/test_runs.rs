@@ -81,7 +81,7 @@ fn a_step_can_bring_its_own_still() {
         .unwrap_err();
     assert!(e.to_string().contains("not a PNG or JPEG"), "{e}");
     let e = node
-        .run("browser.test.step", json!({"run": run, "step": 2, "ok": true, "file": "/nonexistent/x.png"}))
+        .run("browser.test.step", json!({"run": run, "step": 2, "ok": true, "file": fake.dir.path().join("nonexistent.png").to_str().unwrap()}))
         .unwrap_err();
     assert!(e.to_string().contains("not there"), "{e}");
 
@@ -171,4 +171,21 @@ fn a_lane_script_without_the_lock_setting_refuses_the_run() {
         .map(|e| format!("{e:#}"))
         .unwrap_or_default();
     assert!(err.contains("`lock` setting is empty"), "{err}");
+}
+
+#[test]
+fn a_step_cannot_read_a_file_outside_the_nodes_folders() {
+    let fake = Fake::new();
+    let node = node(&fake, json!({}));
+    let run = start(&node);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let mine = elsewhere.path().join("private.png");
+    std::fs::write(&mine, b"\x89PNG\r\n\x1a\nPRIVATE").unwrap();
+    let e = node
+        .run("browser.test.step", json!({"run": run, "step": 1, "ok": true, "file": mine.to_str().unwrap()}))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("outside the folders"), "{e}");
+    let done = node.run("browser.test.finish", json!({"run": run})).unwrap();
+    assert!(!report_text(&done).contains("UklWQVRF"), "nothing of the file is in the report");
 }

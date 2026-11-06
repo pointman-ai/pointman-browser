@@ -298,20 +298,20 @@ fn run(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     if args.is_empty() {
         bail!("args is empty: the words after `agent-browser`, [\"open\", \"https://example.com\"]");
     }
-    if let Some(why) = cli::refused(&args) {
+    std::fs::create_dir_all(&job.work).with_context(|| format!("making {}", job.work.display()))?;
+    if let Some(why) = cli::refused(&args, &job.work, &|p: &Path| x.h.allowed(p)) {
         bail!(why);
     }
-    if args.iter().any(|a| a == "--headed") && !x.setting("headed", false) {
+    if cli::wants_headed(&args) && !x.setting("headed", false) {
         bail!(
             "A visible browser window is off on {} (the Browser extension's \"Visible window\" setting): browse \
              headless, or ask this machine's person to turn it on.",
             x.h.machine()
         );
     }
-    if job.params["agent"].as_str().map(str::trim).unwrap_or_default().is_empty() {
-        bail!("agent is your handle: each agent has its own browser session, named for it");
-    }
-    let agent = cli::session_name(job.params["agent"].as_str());
+    let agent = cli::session_name(job.params["agent"].as_str()).context(
+        "agent is your handle, with letters or digits: each agent has its own browser session, named for it",
+    )?;
     let timeout = Duration::from_secs(job.params["timeout"].as_u64().unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT));
 
     job.progress(None, "agent-browser");
@@ -443,10 +443,8 @@ fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let name = name.context("name is what the run is called: \"Spacesheep staging: sign in\"")?;
     let markdown = job.params["checklist"].as_str().context("checklist is markdown: one `- ` line a step")?;
     let steps = test::parse_checklist(markdown)?;
-    if job.params["agent"].as_str().map(str::trim).unwrap_or_default().is_empty() {
-        bail!("agent is your handle: the run uses your own browser session");
-    }
-    let agent = cli::session_name(job.params["agent"].as_str());
+    let agent = cli::session_name(job.params["agent"].as_str())
+        .context("agent is your handle, with letters or digits: the run uses your own browser session")?;
     let state = x.state();
     test_prune(&state);
     // a run this agent left open gives up its lane first
@@ -456,7 +454,9 @@ fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let mut run = test::new_run(&id, name, &agent, &x.h.machine(), now(), &steps);
     if x.lane().is_none() {
         // a machine that has the lane script but no `lock` setting would run beside other jobs without anyone noticing
-        if let Some(p) = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("lane/heavy.sh")).filter(|p| p.is_file()) {
+        if let Some(p) =
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join("lane/heavy.sh")).filter(|p| p.is_file())
+        {
             bail!("this machine has a heavy-job lock at {} but the `lock` setting is empty: set `lock` to it, so a run holds its lane", p.display());
         }
     }
@@ -588,7 +588,8 @@ fn test_step(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let mut shot_error: Option<String> = None;
     if let Some(f) = file {
         // a still from somewhere else, such as desktop's screenshot of a Mac app
-        let path = PathBuf::from(f);
+        // only from the folders the node lets extensions read (its roots, work and state): never a person's own files
+        let path = x.h.allowed(f)?;
         let meta = std::fs::metadata(&path).with_context(|| format!("file {f}: not there on this machine"))?;
         if !meta.is_file() || meta.len() > test::STILL_MAX {
             bail!("file {f}: must be a PNG or JPEG of at most {} MB", test::STILL_MAX / 1024 / 1024);
@@ -631,7 +632,8 @@ fn test_step(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     step["ok"] = json!(ok);
     step["note"] = note.map_or(Value::Null, Value::String);
     step["shot_file"] = shot.as_ref().map_or(Value::Null, |p| json!(name_of(p)));
-    step["shot_error"] = if shot.is_some() { Value::Null } else { shot_error.clone().map_or(Value::Null, Value::String) };
+    step["shot_error"] =
+        if shot.is_some() { Value::Null } else { shot_error.clone().map_or(Value::Null, Value::String) };
     save_run(&dir, &run)?;
 
     if let Some(p) = &shot {

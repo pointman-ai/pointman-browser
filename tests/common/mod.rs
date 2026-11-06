@@ -35,7 +35,11 @@ set -- $words
 case "$1" in
   open) echo '{"success":true,"data":{"title":"Example Domain","url":"'"$2"'"},"error":null}';;
   snapshot) echo '{"success":true,"data":{"origin":"https://example.com/","refs":{"e1":{"name":"Learn more","role":"link"}},"snapshot":"- link \"Learn more\" [ref=e1]"},"error":null}';;
-  big) printf '{"success":true,"data":{"pad":"%s"},"error":null}\n' "$(head -c 700000 /dev/zero | tr '\0' 'x')";;
+  eval) case "$2" in
+    big) printf '{"success":true,"data":{"pad":"%s"},"error":null}\n' "$(head -c 700000 /dev/zero | tr '\0' 'x')";;
+      crash) echo "thread 'main' panicked" >&2; exit 101;;
+    *) echo '{"success":true,"data":{"result":"ok"},"error":null}';;
+  esac;;
   click) echo '{"success":false,"data":null,"error":"Element not found: '"$2"'"}'; exit 1;;
   screenshot)
     mkdir -p "$here/shots"
@@ -45,7 +49,6 @@ case "$1" in
   get) echo '{"success":true,"data":{"url":"https://staging.example/"},"error":null}';;
   session) echo '{"success":true,"data":{"sessions":["patchbay","deskprobe"]}}';;
   wait) sleep "$2"; echo '{"success":true,"data":{},"error":null}';;
-  crash) echo "thread 'main' panicked" >&2; exit 101;;
   *) echo '{"success":false,"data":null,"error":"unknown command"}'; exit 2;;
 esac
 "#;
@@ -179,6 +182,7 @@ pub fn node(fake: &Fake, settings: Value) -> StandIn {
 pub fn node_in(fake: &Fake, settings: Value, home: &std::path::Path) -> StandIn {
     StandIn::new(ROOT)
         .env("HOME", home.to_str().unwrap())
+        .roots([fake.dir.path().to_path_buf()])
         .binary(env!("CARGO_BIN_EXE_browser"))
         .settings(settings)
         .machine("testbox")
