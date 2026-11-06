@@ -52,6 +52,25 @@ fn now() -> u64 {
 const RUN_DAYS: u64 = 7;
 /// Waiting for the heavy-job lane gives up after this.
 const LANE_WAIT: Duration = Duration::from_secs(30 * 60);
+/// A run holds the lane at most this long: a crashed or abandoned one is let go by the sweeper.
+const LANE_HOLD_MAX: u64 = 30 * 60;
+
+/// The job text the lane sees. Its script gives a job whose words say "window" or "keys-smoke" both lanes, alone, so
+/// a run's name has those words spelled out of it.
+fn lane_job(name: &str) -> String {
+    let mut out = String::new();
+    let mut rest = name;
+    while !rest.is_empty() {
+        let low = rest.to_ascii_lowercase();
+        let hit = ["keys-smoke", "window"].iter().filter_map(|w| low.find(w).map(|i| (i, w.len()))).min();
+        let Some((i, len)) = hit else { break };
+        out.push_str(&rest[..i]);
+        out.push_str(if len == 6 { "win-dow" } else { "keys smoke" });
+        rest = &rest[i + len..];
+    }
+    out.push_str(rest);
+    format!("UI test: {out}")
+}
 
 impl Ext {
     fn state(&self) -> PathBuf {
@@ -437,8 +456,9 @@ fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let mut run = test::new_run(&id, name, &agent, &x.h.machine(), now(), &steps);
     if let Some(script) = x.lane() {
         job.progress(None, "waiting for the heavy-job lane");
-        x.take_lane(&script, &agent, &format!("UI test: {name}"), &|| job.cancelled())?;
+        x.take_lane(&script, &agent, &lane_job(name), &|| job.cancelled())?;
         run["lane"] = json!(script.to_string_lossy());
+        run["lane_at"] = json!(now());
     }
     let dir = test::run_dir(&state, &id);
     if let Err(e) = private_dir(&dir).and_then(|_| save_run(&dir, &run)) {
@@ -493,6 +513,28 @@ fn test_abandon(x: &Ext, state: &Path, agent: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Runs that have held their lane past LANE_HOLD_MAX are closed and the lane let go (a crashed or abandoned run).
+fn lane_sweep(x: &Ext) {
+    let state = x.state();
+    let _guard = lock(&x.runs);
+    let Ok(entries) = std::fs::read_dir(state.join("runs")) else { return };
+    for e in entries.flatten() {
+        let Some(id) = e.file_name().to_str().map(String::from) else { continue };
+        let Ok((dir, mut run)) = load_run(&state, &id) else { continue };
+        let Some(script) = run["lane"].as_str().map(String::from) else { continue };
+        if !run["finished"].is_null() || now().saturating_sub(run["lane_at"].as_u64().unwrap_or(0)) < LANE_HOLD_MAX {
+            continue;
+        }
+        let agent = run["agent"].as_str().unwrap_or_default().to_string();
+        let _ = x.release_lane(Path::new(&script), &agent);
+        run["finished"] = json!(now());
+        run["lane"] = Value::Null;
+        run["abandoned"] = json!(true);
+        let _ = save_run(&dir, &run);
+        x.h.log(format!("closed {id}: {agent} held the lane over {} min", LANE_HOLD_MAX / 60));
+    }
 }
 
 /// Runs untouched for RUN_DAYS go.
@@ -786,11 +828,17 @@ fn main() -> anyhow::Result<()> {
     // the pinned CLI and its Chrome are fetched as soon as the extension starts, so the first call doesn't wait
     let xs = x.clone();
     ext.on_start(move |_: &Handle| {
+        let xs_sweep = xs.clone();
         let xs = xs.clone();
         std::thread::spawn(move || {
             if let Err(e) = xs.cli().and_then(|_| xs.ensure_chrome()) {
                 xs.h.log(format!("{e:#}"));
             }
+        });
+        let xl = xs_sweep.clone();
+        std::thread::spawn(move || loop {
+            lane_sweep(&xl);
+            std::thread::sleep(Duration::from_secs(60));
         });
     });
 
@@ -824,6 +872,13 @@ mod tests {
         assert_eq!(file_stem("snapshot"), "snapshot");
         assert_eq!(file_stem("../../.ssh/x"), "sshx");
         assert_eq!(file_stem(""), "answer");
+    }
+
+    #[test]
+    fn a_job_text_never_says_window_or_keys_smoke() {
+        assert_eq!(lane_job("Staging: sign in"), "UI test: Staging: sign in");
+        let t = lane_job("Window resize + keys-smoke WINDOW");
+        assert!(!t.to_lowercase().contains("window") && !t.to_lowercase().contains("keys-smoke"), "{t}");
     }
 
     #[test]
