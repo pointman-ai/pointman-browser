@@ -635,7 +635,7 @@ mod tests {
     fn numbers_past_2_pow_53_become_strings_and_the_rest_stay() {
         let ran = Ran {
             code: Some(0),
-            stdout: br#"{"success":true,"data":{"a":9007199254740993,"b":-9007199254740993,"c":9007199254740992,"d":-9007199254740992,"e":9223372036854775807,"f":-9223372036854775808,"g":1.5}}"#.to_vec(),
+            stdout: br#"{"success":true,"data":{"a":9007199254740993,"b":-9007199254740993,"c":9007199254740992,"d":-9007199254740992,"e":9223372036854775807,"f":-9223372036854775808,"g":1.5,"h":1e20}}"#.to_vec(),
             ..Default::default()
         };
         let d = &envelope(&ran).unwrap()["data"];
@@ -646,6 +646,7 @@ mod tests {
         assert_eq!(d["e"], "9223372036854775807");
         assert_eq!(d["f"], "-9223372036854775808");
         assert_eq!(d["g"], 1.5);
+        assert!(d["h"].is_string(), "{}", d["h"]);
     }
 
     #[test]
