@@ -31,9 +31,9 @@ GitHub releases (Linux: the static musl builds). Before it is used, it's checked
 |---|---|---|
 | `browser.run` | `args`, `agent`, `doing?`, `timeout?` | `agent-browser --session <agent> --json <args>`, headless; the JSON back with `ok`, `text` and `machine` |
 | `browser.status` | | agent-browser's version, the Chrome it uses, and the open sessions |
-| `browser.test.start` | `name`, `checklist`, `agent` | A run from a markdown checklist (one `- ` line a step, an optional `expect:` under it); `{run}` back. Holds the machine's heavy-job lane, if the `lock` setting names a script |
-| `browser.test.step` | `run`, `step`, `ok`, `note?`, `shot?`, `file?` | One step's result, with a still of the agent's browser session, or of `file` (a PNG or JPEG) |
-| `browser.test.finish` | `run` | `report.html` (from `templates/report.html`, one still a step, failures first) as an output, with `{passed, failed, skipped, steps}`; lets go of the lane |
+| `browser.test_start` | `name`, `checklist`, `agent` | A run from a markdown checklist (one `- ` line a step, an optional `expect:` under it); `{run}` back. Holds the machine's heavy-job lane, if the `lock` setting names a script |
+| `browser.test_step` | `run`, `step`, `ok`, `note?`, `shot?`, `file?` | One step's result, with a still of the agent's browser session, or of `file` (a PNG or JPEG) |
+| `browser.test_finish` | `run` | `report.html` (from `templates/report.html`, one still a step, failures first) as an output, with `{passed, failed, skipped, steps}`; lets go of the lane |
 
 A run is kept in the extension's state folder (`runs/<id>/`) for a week. A run an agent leaves open is closed, and its
 lane let go, when that agent starts another.

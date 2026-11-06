@@ -5,7 +5,7 @@
 [extension]
 id = "browser"
 name = "Browser"
-version = "0.1.0"
+version = "0.1.1"
 publisher = "aurelio"
 summary = "Agents drive a headless browser with agent-browser: open pages, read them, click, type and take screenshots."
 node = ">=0.4.0"
@@ -41,7 +41,7 @@ description = "Path to a browser to use instead of the one agent-browser downloa
 type = "string"
 title = "Heavy-job lock script"
 default = ""
-description = "A script (like ~/lane/heavy.sh) with `take <holder> <job>` and `release <holder>`. A test run holds the machine's heavy-job lane from browser.test.start to browser.test.finish. Empty: no lock."
+description = "A script (like ~/lane/heavy.sh) with `take <holder> <job>` and `release <holder>`. A test run holds the machine's heavy-job lane from browser.test_start to browser.test_finish. Empty: no lock."
 
 [[commands]]
 kind = "browser.run"
@@ -60,26 +60,26 @@ slash = "status"
 summary = "agent-browser's version on this machine, the Chrome it uses, and the open sessions"
 
 [[commands]]
-kind = "browser.test.start"
+kind = "browser.test_start"
 title = "Start a UI test run (name, checklist, agent)"
 params = { type = "object", properties = { name = { type = "string", description = "What the run is called: \"Spacesheep staging: sign in\"" }, checklist = { type = "string", description = "Markdown: one step per `- ` line, with an optional indented `expect: …` line under a step" }, agent = { type = "string", description = "Your handle: the run uses your browser session on this machine" } }, required = ["name", "checklist", "agent"], additionalProperties = false }
 cancellable = true
 slash = "test-start"
-summary = "Start a checklist run on this machine; holds its heavy-job lane until test.finish"
+summary = "Start a checklist run on this machine; holds its heavy-job lane until test_finish"
 
 [[commands]]
-kind = "browser.test.step"
+kind = "browser.test_step"
 title = "Record one step of a run (run, step, ok, note?)"
-params = { type = "object", properties = { run = { type = "string", description = "The id browser.test.start gave" }, step = { type = "integer", minimum = 1, description = "The step's number in the checklist, from 1" }, ok = { type = "boolean", description = "Did the step do what its line and its expect say" }, note = { type = "string", description = "What you saw, in a sentence; for a failure, what went wrong" }, shot = { type = "boolean", default = true, description = "Take a still of your browser session now" }, file = { type = "string", description = "A PNG or JPEG on this machine to use as the still instead, such as desktop's screenshot of a Mac app" } }, required = ["run", "step", "ok"], additionalProperties = false }
+params = { type = "object", properties = { run = { type = "string", description = "The id browser.test_start gave" }, step = { type = "integer", minimum = 1, description = "The step's number in the checklist, from 1" }, ok = { type = "boolean", description = "Did the step do what its line and its expect say" }, note = { type = "string", description = "What you saw, in a sentence; for a failure, what went wrong" }, shot = { type = "boolean", default = true, description = "Take a still of your browser session now" }, file = { type = "string", description = "A PNG or JPEG on this machine to use as the still instead, such as desktop's screenshot of a Mac app" } }, required = ["run", "step", "ok"], additionalProperties = false }
 cancellable = true
 outputs = ["image"]
 slash = "test-step"
 summary = "Record a step's result with a still of the browser, or of a file you give"
 
 [[commands]]
-kind = "browser.test.finish"
+kind = "browser.test_finish"
 title = "Finish a run and make its report (run)"
-params = { type = "object", properties = { run = { type = "string", description = "The id browser.test.start gave" } }, required = ["run"], additionalProperties = false }
+params = { type = "object", properties = { run = { type = "string", description = "The id browser.test_start gave" } }, required = ["run"], additionalProperties = false }
 outputs = ["document"]
 slash = "test-finish"
 summary = "Write report.html, a still for every step, pass or fail; let go of the heavy-job lane"

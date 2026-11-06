@@ -437,7 +437,7 @@ fn version_of(bin: &Path) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
-/// browser.test.start: a run from a checklist, holding the machine's heavy-job lane (where it has one) to `finish`.
+/// browser.test_start: a run from a checklist, holding the machine's heavy-job lane (where it has one) to `finish`.
 fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let name = job.params["name"].as_str().map(str::trim).filter(|n| !n.is_empty());
     let name = name.context("name is what the run is called: \"Spacesheep staging: sign in\"")?;
@@ -493,11 +493,11 @@ fn save_run(dir: &Path, run: &Value) -> anyhow::Result<()> {
 
 fn load_run(state: &Path, id: &str) -> anyhow::Result<(PathBuf, Value)> {
     if !test::valid_run_id(id) {
-        bail!("run is the id browser.test.start gave: run-<number>-<number>");
+        bail!("run is the id browser.test_start gave: run-<number>-<number>");
     }
     let dir = test::run_dir(state, id);
     let text = std::fs::read_to_string(dir.join("run.json"))
-        .with_context(|| format!("no run {id} here: start one with browser.test.start (on this machine)"))?;
+        .with_context(|| format!("no run {id} here: start one with browser.test_start (on this machine)"))?;
     Ok((dir.clone(), serde_json::from_str(&text).with_context(|| format!("{id}'s record is damaged"))?))
 }
 
@@ -578,7 +578,7 @@ fn own_folder_file(x: &Ext, f: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// browser.test.step: one step's result, with a still: the agent's browser (default) or a file from elsewhere.
+/// browser.test_step: one step's result, with a still: the agent's browser (default) or a file from elsewhere.
 fn test_step(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let id = job.params["run"].as_str().unwrap_or_default().to_string();
     let n = job.params["step"].as_u64().context("step is the step's number, from 1")? as usize;
@@ -671,7 +671,7 @@ fn test_step(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     }))
 }
 
-/// browser.test.finish: report.html with a still for each step, and the counts; the lane let go.
+/// browser.test_finish: report.html with a still for each step, and the counts; the lane let go.
 fn test_finish(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let id = job.params["run"].as_str().unwrap_or_default().to_string();
     let state = x.state();
@@ -872,9 +872,9 @@ fn main() -> anyhow::Result<()> {
     let commands: [(&str, Cmd); 5] = [
         ("browser.run", run),
         ("browser.status", status),
-        ("browser.test.start", test_start),
-        ("browser.test.step", test_step),
-        ("browser.test.finish", test_finish),
+        ("browser.test_start", test_start),
+        ("browser.test_step", test_step),
+        ("browser.test_finish", test_finish),
     ];
     for (kind, f) in commands {
         let xc = x.clone();
