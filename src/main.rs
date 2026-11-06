@@ -561,6 +561,23 @@ fn test_prune(state: &Path) {
     }
 }
 
+/// A file for a still: only from this node's work folder (every job's folder, desktop's stills included) or this
+/// extension's state folder. `allowed()` also lets in the node's roots, which can be a whole home folder.
+fn own_folder_file(x: &Ext, f: &str) -> anyhow::Result<PathBuf> {
+    let path = x.h.allowed(f)?;
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let here = canon(&path);
+    let work = x.h.node().work_dir;
+    let ok = [PathBuf::from(work), x.state()]
+        .iter()
+        .filter(|r| !r.as_os_str().is_empty())
+        .any(|r| here.starts_with(canon(r)));
+    if !ok {
+        bail!("file {f}: must be in this node's work folder (a job's output) or this extension's own folder");
+    }
+    Ok(path)
+}
+
 /// browser.test.step: one step's result, with a still: the agent's browser (default) or a file from elsewhere.
 fn test_step(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let id = job.params["run"].as_str().unwrap_or_default().to_string();
@@ -589,7 +606,7 @@ fn test_step(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     if let Some(f) = file {
         // a still from somewhere else, such as desktop's screenshot of a Mac app
         // only from the folders the node lets extensions read (its roots, work and state): never a person's own files
-        let path = x.h.allowed(f)?;
+        let path = own_folder_file(x, f)?;
         let meta = std::fs::metadata(&path).with_context(|| format!("file {f}: not there on this machine"))?;
         if !meta.is_file() || meta.len() > test::STILL_MAX {
             bail!("file {f}: must be a PNG or JPEG of at most {} MB", test::STILL_MAX / 1024 / 1024);

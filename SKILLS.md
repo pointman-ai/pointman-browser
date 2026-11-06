@@ -56,7 +56,7 @@ page with a still for every step, pass or fail.
 2. **For each step:** do it with `browser.run`, look at the result, then `browser.test.step {run, step, ok, note?}`.
    `step` is its number from 1. `ok` is whether the page did what the step and its `expect` say, judged from the
    snapshot, never assumed. Write a `note` for every failure: what you saw instead. A still of your browser is taken
-   for you. For a step that isn't in the browser, pass `file` (a PNG or JPEG on that machine, such as `desktop`'s
+   for you. For a step that isn't in the browser, pass `file` (a PNG or JPEG from this node's work folder, such as `desktop`'s
    screenshot of a Mac app) and `shot: false` isn't needed.
 3. **Don't stop at the first failure** unless the rest can't work without it. Record the later steps you can still do;
    a step you never reach is shown as not run.
@@ -70,6 +70,7 @@ page with a still for every step, pass or fail.
 
 - **Your own session.** The extension names it for the `agent` you pass: always pass your handle. You can't use
   another's session or `--session`.
+- **Text that starts with `-` is read as a flag** and refused (`fill @e1 "-x"`), and text containing `file:` is refused too.
 - **Test accounts only.** Never a person's browser, profile or cookies: only the common browsing commands and
   their flags are allowed (see the README); `--profile`, `--cdp`, `file:` URLs, `upload`, `cookies` and the rest are
   refused, and a screenshot's path must be inside the job's folder. Log in with a test account made for agents, and take its password from the vault

@@ -71,6 +71,8 @@ fn a_persons_browser_and_other_sessions_are_refused() {
         json!(["wait", "--download", "/tmp/x"]),
         json!(["screenshot", "/Users/someone/Desktop/a.png"]),
         json!(["screenshot", "../a.png"]),
+        json!(["screenshot", "/Users/someone/.zshrc"]),
+        json!(["screenshot", "../../../.zshrc"]),
         json!(["open", "https://x.test", "--allow-file-access"]),
     ] {
         let e = node.run("browser.run", json!({"args": args, "agent": "a"})).unwrap_err().to_string();

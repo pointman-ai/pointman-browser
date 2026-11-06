@@ -68,20 +68,20 @@ fn a_step_can_bring_its_own_still() {
     let fake = Fake::new();
     let node = node(&fake, json!({}));
     let run = start(&node);
-    let still = fake.dir.path().join("mac-app.png");
+    let still = node.work_dir().join("mac-app.png");
     std::fs::write(&still, b"\x89PNG\r\n\x1a\nMACAPP").unwrap();
     let r = step(&node, &run, 1, true, json!({"file": still.to_str().unwrap()}));
     assert_eq!(r["shot"], true);
     assert!(fake.calls_of("screenshot").is_empty(), "the browser isn't asked for one");
 
-    let not_image = fake.dir.path().join("notes.png");
+    let not_image = node.work_dir().join("notes.png");
     std::fs::write(&not_image, b"<html>").unwrap();
     let e = node
         .run("browser.test.step", json!({"run": run, "step": 2, "ok": true, "file": not_image.to_str().unwrap()}))
         .unwrap_err();
     assert!(e.to_string().contains("not a PNG or JPEG"), "{e}");
     let e = node
-        .run("browser.test.step", json!({"run": run, "step": 2, "ok": true, "file": fake.dir.path().join("nonexistent.png").to_str().unwrap()}))
+        .run("browser.test.step", json!({"run": run, "step": 2, "ok": true, "file": node.work_dir().join("nonexistent.png").to_str().unwrap()}))
         .unwrap_err();
     assert!(e.to_string().contains("not there"), "{e}");
 
@@ -178,14 +178,14 @@ fn a_step_cannot_read_a_file_outside_the_nodes_folders() {
     let fake = Fake::new();
     let node = node(&fake, json!({}));
     let run = start(&node);
-    let elsewhere = tempfile::tempdir().unwrap();
-    let mine = elsewhere.path().join("private.png");
+    // inside a root the node allows (a person's home, say), but not the node's work folder or this extension's own
+    let mine = fake.dir.path().join("private.png");
     std::fs::write(&mine, b"\x89PNG\r\n\x1a\nPRIVATE").unwrap();
     let e = node
         .run("browser.test.step", json!({"run": run, "step": 1, "ok": true, "file": mine.to_str().unwrap()}))
         .unwrap_err()
         .to_string();
-    assert!(e.contains("outside the folders"), "{e}");
+    assert!(e.contains("must be in this node's work folder"), "{e}");
     let done = node.run("browser.test.finish", json!({"run": run})).unwrap();
     assert!(!report_text(&done).contains("UklWQVRF"), "nothing of the file is in the report");
 }

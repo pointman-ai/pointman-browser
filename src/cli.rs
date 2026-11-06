@@ -333,6 +333,15 @@ fn work_path(given: &str, work: &Path, allowed: &dyn Fn(&Path) -> anyhow::Result
     Ok(full)
 }
 
+/// How agent-browser 0.41.2 tells `screenshot <word>`'s path from its selector.
+fn looks_like_path(w: &str) -> bool {
+    let l = w.to_ascii_lowercase();
+    l.starts_with("./")
+        || l.starts_with("../")
+        || l.contains('/')
+        || [".png", ".jpg", ".jpeg", ".webp"].iter().any(|e| l.ends_with(e))
+}
+
 /// What agents may not ask for, as an allowlist of commands and flags: nothing reaches a person's browser, profile or
 /// files, another agent's session, or the machine through a new agent-browser feature. Returns why, or None. `args`
 /// are the words after `agent-browser`; a path a command writes must be inside `work` and one `allowed` lets in.
@@ -378,10 +387,8 @@ pub fn refused(args: &[String], work: &Path, allowed: &dyn Fn(&Path) -> anyhow::
         let rest = &words[1..];
         let path = match rest {
             [] => None,
-            [one] => {
-                let l = one.to_ascii_lowercase();
-                [".png", ".jpg", ".jpeg", ".webp"].iter().any(|e| l.ends_with(e)).then_some(*one)
-            }
+            // agent-browser's own rule for one word: a path if it starts with ./ or ../, has a /, or ends in an image
+            [one] => looks_like_path(one).then_some(*one),
             [_, path] => Some(*path),
             _ => return Some("screenshot takes a selector and a path, at most.".to_string()),
         };
@@ -566,11 +573,17 @@ mod tests {
             &["screenshot", "a/../../b.png"],
             &["screenshot", "~/a.png"],
             &["screenshot", "#main", "/tmp/out.png"],
+            &["screenshot", "/Users/james/.zshrc"],
+            &["screenshot", "../../../.zshrc"],
+            &["screenshot", "./../x"],
+            &["screenshot", "/etc/hosts"],
         ] {
             assert!(deny(bad).is_some(), "{bad:?}");
         }
         assert_eq!(deny(&["screenshot", inside.to_str().unwrap()]), None);
         assert_eq!(deny(&["screenshot", "a.png"]), None);
+        assert_eq!(deny(&["screenshot", "dir/file"]), None, "inside the job's folder");
+        assert_eq!(deny(&["screenshot", "#main > a"]), None, "a selector, not a path");
     }
 
     #[test]
