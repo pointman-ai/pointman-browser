@@ -37,8 +37,17 @@ pub struct Ran {
 /// Run it to its end, its deadline, or `cancelled()`: then it's killed. Its output is what it wrote by the time it
 /// ended: a process it left behind holding the pipes (wl-copy, owning a Wayland clipboard it set) isn't waited for.
 pub fn run(call: &Call, cancelled: &dyn Fn() -> bool) -> anyhow::Result<Ran> {
+    run_with_input(call, None, cancelled)
+}
+
+/// The same, with `input` written to its stdin (a password, which never goes in argv) and then closed.
+pub fn run_with_input(call: &Call, input: Option<&[u8]>, cancelled: &dyn Fn() -> bool) -> anyhow::Result<Ran> {
     let mut cmd = Command::new(call.bin);
-    cmd.args(call.argv).current_dir(call.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(call.argv)
+        .current_dir(call.cwd)
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     // a scope from the node's own environment would send every call into someone else's session
     for (name, _) in std::env::vars_os() {
         if name.to_string_lossy().starts_with("AGENT_BROWSER_") {
@@ -49,6 +58,11 @@ pub fn run(call: &Call, cancelled: &dyn Fn() -> bool) -> anyhow::Result<Ran> {
         cmd.env(k, v);
     }
     let mut child = cmd.spawn().with_context(|| format!("starting {}", call.bin.display()))?;
+    if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
+        use std::io::Write;
+        // a CLI that exits without reading is its own answer: the write's error is not
+        let _ = stdin.write_all(bytes);
+    }
     let out = Pipe::read(child.stdout.take().context("its stdout")?, STDOUT_MAX);
     let err = Pipe::read(child.stderr.take().context("its stderr")?, STDERR_MAX);
     let started = Instant::now();

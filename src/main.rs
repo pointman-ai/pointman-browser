@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use browser::cli::{self, Call};
+use browser::login::{self, Login};
 use browser::{install, test};
 use pointman_extension::protocol::output_request::Role;
 use pointman_extension::protocol::{HealthCheckRequest, HealthCheckResponse, HealthFixRequest, HealthFixResponse};
@@ -377,6 +378,74 @@ fn strings(v: &Value, name: &str) -> anyhow::Result<Vec<String>> {
         .collect()
 }
 
+/// Sign `agent`'s session in with the test login `label` (the vault's `browser.login.<label>`), without the agent
+/// seeing a value: the Cloudflare Access headers go to that one origin (agent-browser scopes `--headers` to it), and
+/// the password goes on agent-browser's stdin, not its argv. The saved profile is deleted again whatever happens.
+fn sign_in(
+    x: &Ext,
+    bin: &Path,
+    home: &Path,
+    agent: &str,
+    label: &str,
+    cwd: &Path,
+    cancelled: &dyn Fn() -> bool,
+) -> anyhow::Result<Login> {
+    let item = login::item_name(label)?;
+    let text = x
+        .h
+        .secret(&item)
+        .map_err(|_| anyhow::anyhow!("there is no login named {label}: James adds one with `/browser add {label}`"))?;
+    let l = Login::parse(&text).map_err(|e| anyhow::anyhow!("the login {label} isn't usable: {e}"))?;
+    let profile = format!("pb-{agent}");
+    let step = |args: Vec<String>, input: Option<&[u8]>, what: &str| -> anyhow::Result<()> {
+        let mut argv = vec!["--session".to_string(), agent.to_string(), "--json".to_string()];
+        argv.extend(args);
+        let vars = x.env(home)?;
+        let c = Call { bin, argv: &argv, env: &vars, cwd, timeout: Duration::from_secs(90) };
+        let ran = cli::run_with_input(&c, input, cancelled)?;
+        if ran.cancelled {
+            bail!(pointman_extension::Cancelled);
+        }
+        let env = cli::envelope(&ran).map_err(|e| anyhow::anyhow!("{what}: {}", l.scrub_text(&format!("{e:#}"))))?;
+        if env["success"].as_bool() == Some(false) || env["ok"].as_bool() == Some(false) {
+            let why = env["error"]["message"].as_str().or(env["error"].as_str()).unwrap_or("it failed");
+            bail!("{what} failed: {}", l.scrub_text(why));
+        }
+        Ok(())
+    };
+    let s = |v: &str| v.to_string();
+    let result = (|| {
+        step(vec![s("open"), l.url.clone(), s("--headers"), l.access_headers()], None, "opening the sign-in page")?;
+        step(
+            vec![
+                s("auth"),
+                s("save"),
+                profile.clone(),
+                s("--url"),
+                l.url.clone(),
+                s("--username"),
+                l.email.clone(),
+                s("--password-stdin"),
+            ],
+            Some(l.password.as_bytes()),
+            "saving the login",
+        )?;
+        step(vec![s("auth"), s("login"), profile.clone()], None, "signing in")
+    })();
+    let _ = step(vec![s("auth"), s("delete"), profile.clone()], None, "removing the saved login");
+    result?;
+    Ok(l)
+}
+
+/// The `login` param: a label, or none.
+fn login_label(job: &Job) -> anyhow::Result<Option<String>> {
+    match &job.params["login"] {
+        Value::Null => Ok(None),
+        Value::String(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
+        _ => bail!("login is the label of a test login James added with `/browser add`, such as stagesheep"),
+    }
+}
+
 /// browser.run: one agent-browser command in the agent's own session, its envelope back, a screenshot posted.
 fn run(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let args = strings(&job.params["args"], "args")?;
@@ -399,11 +468,19 @@ fn run(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     )?;
     let timeout = Duration::from_secs(job.params["timeout"].as_u64().unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT));
 
+    let label = login_label(job)?;
     job.progress(None, "agent-browser");
     let bin = x.cli()?;
     x.ensure_chrome()?;
     let home = x.home()?;
     std::fs::create_dir_all(&job.work).with_context(|| format!("making {}", job.work.display()))?;
+    let signed = match &label {
+        Some(l) => {
+            job.progress(None, "signing in");
+            Some(sign_in(x, &bin, &home, &agent, l, &job.work, &|| job.cancelled())?)
+        }
+        None => None,
+    };
     let before = files_in(&job.work);
 
     let (mut env, command) = call(x, &bin, &home, &agent, &args, &job.work, timeout, &|| job.cancelled())?;
@@ -436,6 +513,11 @@ fn run(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     });
     answer["session"] = Value::String(agent);
     answer["machine"] = Value::String(x.h.machine());
+    if let Some(l) = &signed {
+        // agent-browser echoes typed text and URLs: nothing of the login leaves in an answer
+        l.scrub(&mut answer);
+        answer["login"] = Value::String(label.clone().unwrap_or_default());
+    }
     Ok(answer)
 }
 
@@ -480,6 +562,14 @@ fn file_stem(command: &str) -> String {
     }
 }
 
+/// browser.add: the apps' form for a test login seals its value into the vault, so there is nothing for the
+/// extension to do; this is the command the form hangs from.
+fn add(_x: &Ext, _job: &Job) -> anyhow::Result<Value> {
+    Ok(
+        json!({"ok": true, "text": "Add a test login with /browser add <label> in the app: five KEY=value lines, kept in the vault."}),
+    )
+}
+
 /// browser.status: agent-browser's version, the Chrome it uses, and the open sessions.
 fn status(x: &Ext, _job: &Job) -> anyhow::Result<Value> {
     let bin = x.cli()?;
@@ -489,6 +579,8 @@ fn status(x: &Ext, _job: &Job) -> anyhow::Result<Value> {
         sessions.as_ref().and_then(|v| v["data"]["sessions"].as_array().cloned()).unwrap_or_default();
     let chrome = match x.system_chrome() {
         Some(p) => json!({"kind": "system", "path": p.to_string_lossy()}),
+        // NixOS never uses a downloaded Chrome: until the first call builds Chromium, say so
+        None if is_nixos() => json!({"kind": "not_built"}),
         None => match downloaded_chrome(&home) {
             Some(v) => json!({"kind": "downloaded", "version": v}),
             None => json!({"kind": "none"}),
@@ -497,13 +589,9 @@ fn status(x: &Ext, _job: &Job) -> anyhow::Result<Value> {
     let version =
         if std::env::var_os("POINTMAN_BROWSER_CLI").is_some() { version_of(&bin) } else { install::VERSION.into() };
     let text = format!(
-        "agent-browser {version} on {}: Chrome {}, {} open session{}",
+        "agent-browser {version} on {}: {}, {} open session{}",
         x.h.machine(),
-        match chrome["kind"].as_str() {
-            Some("system") => format!("(system) {}", chrome["path"].as_str().unwrap_or("")),
-            Some("downloaded") => chrome["version"].as_str().unwrap_or("?").to_string(),
-            _ => "not installed yet".into(),
-        },
+        chrome_text(&chrome),
         list.len(),
         if list.len() == 1 { "" } else { "s" }
     );
@@ -513,6 +601,16 @@ fn status(x: &Ext, _job: &Job) -> anyhow::Result<Value> {
         "text": text,
         "machine": x.h.machine(),
     }))
+}
+
+/// What `browser.status` says about the Chrome, from its `chrome` answer.
+fn chrome_text(chrome: &Value) -> String {
+    match chrome["kind"].as_str() {
+        Some("system") => format!("Chrome (system) {}", chrome["path"].as_str().unwrap_or("")),
+        Some("downloaded") => format!("Chrome {}", chrome["version"].as_str().unwrap_or("?")),
+        Some("not_built") => "Chromium not built yet (builds on the first call)".into(),
+        _ => "Chrome not installed yet".into(),
+    }
 }
 
 fn version_of(bin: &Path) -> String {
@@ -530,6 +628,7 @@ fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let steps = test::parse_checklist(markdown)?;
     let agent = cli::session_name(job.params["agent"].as_str())
         .context("agent is your handle, with letters or digits: the run uses your own browser session")?;
+    let label = login_label(job)?;
     let state = x.state();
     test_prune(&state);
     // a run this agent left open gives up its lane first
@@ -550,6 +649,24 @@ fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
         x.take_lane(&script, &agent, &lane_job(name), &|| job.cancelled())?;
         run["lane"] = json!(script.to_string_lossy());
         run["lane_at"] = json!(now());
+    }
+    if let Some(l) = &label {
+        job.progress(None, "signing in");
+        let signed = x.cli().and_then(|bin| {
+            x.ensure_chrome()?;
+            let home = x.home()?;
+            std::fs::create_dir_all(&job.work)?;
+            sign_in(x, &bin, &home, &agent, l, &job.work, &|| job.cancelled())
+        });
+        match signed {
+            Ok(_) => run["login"] = json!(l),
+            Err(e) => {
+                if let Some(script) = x.lane() {
+                    let _ = x.release_lane(&script, &agent);
+                }
+                return Err(e);
+            }
+        }
     }
     let dir = test::run_dir(&state, &id);
     if let Err(e) = private_dir(&dir).and_then(|_| save_run(&dir, &run)) {
@@ -963,7 +1080,8 @@ fn main() -> anyhow::Result<()> {
     });
 
     type Cmd = fn(&Ext, &Job) -> anyhow::Result<Value>;
-    let commands: [(&str, Cmd); 5] = [
+    let commands: [(&str, Cmd); 6] = [
+        ("browser.add", add),
         ("browser.run", run),
         ("browser.status", status),
         ("browser.test_start", test_start),
@@ -1019,6 +1137,17 @@ mod nix_tests {
         let state = Path::new("/state/browser");
         assert_eq!(nix_chrome_link(state), Path::new("/state/browser/chromium"));
         assert_eq!(nix_chrome_bin(state), Path::new("/state/browser/chromium/bin/chromium"));
+    }
+
+    #[test]
+    fn status_says_chromium_is_not_built_yet_on_nixos() {
+        assert_eq!(chrome_text(&json!({"kind": "not_built"})), "Chromium not built yet (builds on the first call)");
+        assert_eq!(
+            chrome_text(&json!({"kind": "system", "path": "/s/chromium/bin/chromium"})),
+            "Chrome (system) /s/chromium/bin/chromium"
+        );
+        assert_eq!(chrome_text(&json!({"kind": "downloaded", "version": "157.0.8103.38"})), "Chrome 157.0.8103.38");
+        assert_eq!(chrome_text(&json!({"kind": "none"})), "Chrome not installed yet");
     }
 
     #[test]

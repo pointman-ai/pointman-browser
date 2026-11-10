@@ -66,6 +66,13 @@ page with a still for every step, pass or fail.
    your own handle and never another agent's: the run drives that agent's browser session and its test logins.
 6. **The run is yours alone:** one open run per agent. Starting another closes the old one and gives up its lock.
 
+## A site behind a login
+
+A person adds a test login for a site with `/browser add <label>` (the site's sign-in URL, a Cloudflare Access service
+token if it has one, and a test account). You never see its values. Pass its label as `login` to `browser.run` or
+`browser.test_start`, and your session is signed in before your first command. A label that doesn't exist, or a login
+that isn't usable, is an error that names the label and the key, never a value.
+
 ## Rules
 
 - **Your own session.** The extension names it for the `agent` you pass: always pass your handle. You can't use

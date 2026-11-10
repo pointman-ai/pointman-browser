@@ -34,6 +34,13 @@ done
 set -- $words
 case "$1" in
   open) echo '{"success":true,"data":{"title":"Example Domain","url":"'"$2"'"},"error":null}';;
+  auth) case "$2" in
+    save) cat > "$here/stdin.log"; echo '{"success":true,"data":{"saved":"'"$3"'"},"error":null}';;
+    login) if [ -f "$here/login-fails" ]; then echo '{"success":false,"data":null,"error":"login failed for hunter2 pass"}'; exit 1; fi
+      echo '{"success":true,"data":{"typed":"hunter2 pass","email":"bot@example.com"},"error":null}';;
+    delete) echo "deleted $3" >> "$here/deleted.log"; echo '{"success":true,"data":{},"error":null}';;
+    *) echo '{"success":false,"data":null,"error":"unknown auth"}'; exit 2;;
+  esac;;
   snapshot) echo '{"success":true,"data":{"origin":"https://example.com/","refs":{"e1":{"name":"Learn more","role":"link"}},"snapshot":"- link \"Learn more\" [ref=e1]"},"error":null}';;
   eval) case "$2" in
     big) printf '{"success":true,"data":{"pad":"%s"},"error":null}\n' "$(head -c 700000 /dev/zero | tr '\0' 'x')";;
@@ -174,6 +181,23 @@ pub fn calls_in(log: &Path) -> Vec<FakeCall> {
 pub fn node(fake: &Fake, settings: Value) -> StandIn {
     let home = tempfile::tempdir().unwrap();
     let node = node_in(fake, settings, home.path());
+    std::mem::forget(home);
+    node
+}
+
+/// The extension with the vault holding `secrets` (name, value) as its node would open them.
+pub fn node_with_secrets(fake: &Fake, settings: Value, secrets: &[(&str, &str)]) -> StandIn {
+    let home = tempfile::tempdir().unwrap();
+    let node = StandIn::new(ROOT)
+        .env("HOME", home.path().to_str().unwrap())
+        .roots([fake.dir.path().to_path_buf()])
+        .binary(env!("CARGO_BIN_EXE_browser"))
+        .settings(settings)
+        .machine("testbox")
+        .secrets(secrets.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        .env("POINTMAN_BROWSER_CLI", fake.path())
+        .start()
+        .unwrap();
     std::mem::forget(home);
     node
 }
