@@ -5,7 +5,7 @@
 [extension]
 id = "browser"
 name = "Browser"
-version = "0.1.3"
+version = "0.1.5"
 publisher = "aurelio"
 summary = "Agents drive a headless browser with agent-browser: open pages, read them, click, type and take screenshots."
 node = ">=0.4.0"
@@ -20,7 +20,19 @@ runtime = "binary"
 skill = "SKILLS.md"
 
 [permissions]
+secrets = ["browser.*"]    # the test logins James adds with /browser add: the extension signs in with them, the agent never sees them
 network = true                   # agent-browser's pinned release and Chrome, once per version; and the pages agents open
+
+# A test login for a site behind Cloudflare Access with a sign-in form (stagesheep.dev). One pasted value, five lines;
+# the extension sends the Access headers to that one origin and types the password itself.
+[[credentials]]
+id = "login"
+title = "Test login"
+help = "Five lines, one each: URL=https://… (the sign-in page), ACCESS_CLIENT_ID=… and ACCESS_CLIENT_SECRET=… (a Cloudflare Access service token for that site, Zero Trust › Access › Service Auth), EMAIL=… and PASSWORD=… (a staging-only test account). Agents use it by its label and never see it."
+item = "browser.{label}"
+value = '''(?s)(?=.*(?:^|\n)\s*URL=https://\S)(?=.*(?:^|\n)\s*ACCESS_CLIENT_ID=\S)(?=.*(?:^|\n)\s*ACCESS_CLIENT_SECRET=\S)(?=.*(?:^|\n)\s*EMAIL=\S)(?=.*(?:^|\n)\s*PASSWORD=\S).+'''
+placeholder = "URL=https://…"
+needed = 0
 
 [settings]
 type = "object"
@@ -44,9 +56,17 @@ default = ""
 description = "A script (like ~/lane/heavy.sh) with `take <holder> <job>` and `release <holder>`. A test run holds the machine's heavy-job lane from browser.test_start to browser.test_finish. Empty: no lock."
 
 [[commands]]
+kind = "browser.add"
+title = "Add a test login"
+params = { type = "object", properties = { name = { type = "string", description = "What to call it (stagesheep): lowercase letters, digits, . _ -" } } }
+slash = "add"
+form = "login"
+summary = "Add a test login for a site: its URL, Access token, and test account"
+
+[[commands]]
 kind = "browser.run"
 title = "Run agent-browser (args, agent, doing?)"
-params = { type = "object", properties = { args = { type = "array", items = { type = "string" }, description = "The words after `agent-browser`: [\"open\", \"https://example.com\"], then [\"snapshot\", \"-i\", \"-c\"], [\"click\", \"@e1\"], [\"fill\", \"@e2\", \"text\"], [\"screenshot\"]" }, agent = { type = "string", description = "Your handle: your own browser session on this machine is named for it" }, doing = { type = "string", description = "What you're doing, in a few words" }, timeout = { type = "integer", minimum = 1, maximum = 600, default = 60, description = "Seconds before it's stopped" } }, required = ["args", "agent"], additionalProperties = false }
+params = { type = "object", properties = { args = { type = "array", items = { type = "string" }, description = "The words after `agent-browser`: [\"open\", \"https://example.com\"], then [\"snapshot\", \"-i\", \"-c\"], [\"click\", \"@e1\"], [\"fill\", \"@e2\", \"text\"], [\"screenshot\"]" }, agent = { type = "string", description = "Your handle: your own browser session on this machine is named for it" }, doing = { type = "string", description = "What you're doing, in a few words" }, timeout = { type = "integer", minimum = 1, maximum = 600, default = 60, description = "Seconds before it's stopped" }, login = { type = "string", description = "The label of a test login James added with `/browser add`: the extension signs your session in first, and you never see its values" } }, required = ["args", "agent"], additionalProperties = false }
 cancellable = true
 outputs = ["image", "document"]
 slash = "run"
@@ -62,7 +82,7 @@ summary = "agent-browser's version on this machine, the Chrome it uses, and the 
 [[commands]]
 kind = "browser.test_start"
 title = "Start a UI test run (name, checklist, agent)"
-params = { type = "object", properties = { name = { type = "string", description = "What the run is called: \"Spacesheep staging: sign in\"" }, checklist = { type = "string", description = "Markdown: one step per `- ` line, with an optional indented `expect: …` line under a step" }, agent = { type = "string", description = "Your handle: the run uses your browser session on this machine" } }, required = ["name", "checklist", "agent"], additionalProperties = false }
+params = { type = "object", properties = { name = { type = "string", description = "What the run is called: \"Spacesheep staging: sign in\"" }, checklist = { type = "string", description = "Markdown: one step per `- ` line, with an optional indented `expect: …` line under a step" }, agent = { type = "string", description = "Your handle: the run uses your browser session on this machine" }, login = { type = "string", description = "The label of a test login James added with `/browser add`: the run starts with your session signed in" } }, required = ["name", "checklist", "agent"], additionalProperties = false }
 cancellable = true
 slash = "test-start"
 summary = "Start a checklist run on this machine; holds its heavy-job lane until test_finish"
