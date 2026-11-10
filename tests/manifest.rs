@@ -47,8 +47,7 @@ fn the_manifest_keeps_to_cores_limits() {
         ext_id.starts_with(|c: char| c.is_ascii_lowercase())
             && (2..=32).contains(&ext_id.len())
             && ext_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-            && (rest == "{label}"
-                || rest.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))),
+            && (rest == "{label}" || rest.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))),
         "item {item} breaks core's pattern"
     );
     assert!(!rest.contains("{label}") || rest == "{label}", "{{label}} is the whole part after the first dot");

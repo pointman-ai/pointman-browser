@@ -106,8 +106,7 @@ fn a_run_with_a_login_holds_its_session_and_the_lane() {
     let fake = Fake::new();
     let home = tempfile::tempdir().unwrap();
     let lane = fake_lane(home.path());
-    let node =
-        node_with_secrets(&fake, json!({"lock": lane.to_str().unwrap()}), &[("browser.stagesheep", PASTE)]);
+    let node = node_with_secrets(&fake, json!({"lock": lane.to_str().unwrap()}), &[("browser.stagesheep", PASTE)]);
     let start = node
         .run(
             "browser.test_start",
