@@ -181,13 +181,14 @@ impl Ext {
         Ok(dir)
     }
 
-    /// The Chrome to use on Linux: the `chrome` setting, else one on the PATH (NixOS can't run a downloaded Chrome).
+    /// The Chrome to use: the `chrome` setting; on NixOS the extension's own out-link; on other Linux one on the PATH.
     fn system_chrome(&self) -> Option<PathBuf> {
         if let Some(p) = self.h.settings()["chrome"].as_str().filter(|p| !p.trim().is_empty()) {
             return Some(PathBuf::from(p.trim()));
         }
-        if let Some(p) = self.nix_chrome() {
-            return Some(p);
+        if is_nixos() {
+            // on NixOS: the setting or this extension's own out-link, never whatever is on the PATH
+            return self.nix_chrome();
         }
         if !cfg!(target_os = "linux") {
             return None;

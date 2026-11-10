@@ -121,3 +121,17 @@ fn a_failed_build_says_nix_s_reason_and_retries_without_telling_anyone_to_instal
     let _ = open(&node);
     assert_eq!(nix_calls(nix.path()).len(), before + 1, "the next call tries again");
 }
+
+#[test]
+fn on_nixos_a_chromium_on_the_path_is_never_used_instead() {
+    let fake = Fake::new();
+    let nix = stand_in_nix(true);
+    // a chromium on the PATH, as on a CI runner
+    let chromium = nix.path().join("chromium");
+    std::fs::write(&chromium, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&chromium, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let node = nixos(&fake, nix.path(), json!({}));
+    assert!(open(&node).is_err(), "the failed build stays failed");
+    assert!(fake.calls_of("open").is_empty(), "agent-browser never got the PATH's chromium");
+    assert_eq!(part(&node, "chrome")["state"], "STATE_FAILING");
+}
