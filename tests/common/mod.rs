@@ -33,7 +33,7 @@ done
 if [ "$1" = "--version" ]; then echo "agent-browser 9.9.9"; exit 0; fi
 words=""; prev=""
 for a in "$@"; do
-  case "$prev" in --session|--config) ;; *) case "$a" in --session|--json) ;; *) words="$words $a";; esac;; esac
+  case "$prev" in --session|--config) ;; *) case "$a" in --session|--json|--config) ;; *) words="$words $a";; esac;; esac
   prev="$a"
 done
 set -- $words
