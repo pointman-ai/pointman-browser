@@ -5,7 +5,7 @@
 [extension]
 id = "browser"
 name = "Browser"
-version = "0.1.2"
+version = "0.1.3"
 publisher = "aurelio"
 summary = "Agents drive a headless browser with agent-browser: open pages, read them, click, type and take screenshots."
 node = ">=0.4.0"
@@ -35,7 +35,7 @@ description = "Let agents ask for a visible browser window (--headed) on this ma
 type = "string"
 title = "Chrome or Chromium"
 default = ""
-description = "Path to a browser to use instead of the one agent-browser downloads. Needed on NixOS; on Linux a chromium on the PATH is found without it."
+description = "Path to a browser to use instead of the one agent-browser downloads. Empty is fine: on NixOS the extension builds its own Chromium (nix build nixpkgs#chromium) into its state folder; elsewhere on Linux a chromium on the PATH is used."
 
 [settings.properties.lock]
 type = "string"

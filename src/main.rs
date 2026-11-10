@@ -82,6 +82,11 @@ impl Ext {
         }
     }
 
+    /// A text setting that isn't empty.
+    fn setting_set(&self, name: &str) -> bool {
+        self.h.settings()[name].as_str().is_some_and(|p| !p.trim().is_empty())
+    }
+
     fn setting(&self, name: &str, default: bool) -> bool {
         self.h.settings()[name].as_bool().unwrap_or(default)
     }
@@ -176,15 +181,57 @@ impl Ext {
         Ok(dir)
     }
 
-    /// The Chrome to use on Linux: the `chrome` setting, else one on the PATH (NixOS can't run a downloaded Chrome).
+    /// The Chrome to use: the `chrome` setting; on NixOS the extension's own out-link; on other Linux one on the PATH.
     fn system_chrome(&self) -> Option<PathBuf> {
         if let Some(p) = self.h.settings()["chrome"].as_str().filter(|p| !p.trim().is_empty()) {
             return Some(PathBuf::from(p.trim()));
+        }
+        if is_nixos() {
+            // on NixOS: the setting or this extension's own out-link, never whatever is on the PATH
+            return self.nix_chrome();
         }
         if !cfg!(target_os = "linux") {
             return None;
         }
         which(&SYSTEM_CHROME)
+    }
+
+    /// The Chromium this extension built on NixOS: `<state>/chromium/bin/chromium`, a GC root in its own folder.
+    fn nix_chrome(&self) -> Option<PathBuf> {
+        let p = nix_chrome_bin(&self.state());
+        p.is_file().then_some(p)
+    }
+
+    /// NixOS can't run a downloaded Chrome and the person installs nothing: build nixpkgs' Chromium into the state
+    /// folder the first time, unless the `chrome` setting names one or the out-link is there.
+    fn ensure_nix_chrome(&self) -> anyhow::Result<()> {
+        let set = self.setting_set("chrome");
+        if set || !is_nixos() || self.nix_chrome().is_some() {
+            return Ok(());
+        }
+        let mut last = lock(&self.chrome_installing);
+        if self.nix_chrome().is_some() {
+            return Ok(());
+        }
+        let nix =
+            which(&["nix"]).context("this is NixOS but `nix` isn't on the node's PATH, so Chromium can't be built")?;
+        let home = self.home()?;
+        let link = nix_chrome_link(&self.state());
+        let argv = nix_build_argv(&link);
+        let call = Call { bin: &nix, argv: &argv, env: &[], cwd: &home, timeout: CHROME_INSTALL };
+        let ran = cli::run(&call, &|| false)?;
+        if self.nix_chrome().is_some() {
+            *last = None;
+            self.h.log(format!("built Chromium at {}", link.display()));
+            return Ok(());
+        }
+        let why = format!(
+            "nix couldn't build Chromium (exit {}): {}",
+            ran.code.map_or("signal".into(), |c| c.to_string()),
+            cli::clip(String::from_utf8_lossy(&ran.stderr).trim(), 400)
+        );
+        *last = Some(why.clone());
+        bail!(why)
     }
 
     fn env(&self, home: &Path) -> anyhow::Result<Vec<(String, String)>> {
@@ -209,6 +256,7 @@ impl Ext {
 
     /// The Chrome agent-browser downloads (`agent-browser install`), unless a system one is used or it's there.
     fn ensure_chrome(&self) -> anyhow::Result<()> {
+        self.ensure_nix_chrome()?;
         if self.system_chrome().is_some() || std::env::var_os("POINTMAN_BROWSER_CLI").is_some() {
             return Ok(());
         }
@@ -237,6 +285,43 @@ impl Ext {
         );
         *last = Some(why.clone());
         bail!(why)
+    }
+}
+
+/// The nixpkgs revision Chromium is built from on NixOS: nixos-unstable's Hydra-built head on 2026-11-07
+/// (channels.nixos.org/nixos-unstable/git-revision), so cache.nixos.org has it and every machine gets the same one.
+const NIXPKGS_REV: &str = "f4a03c008967841f2a0b3cb7c436fc6fc31671f6";
+
+/// The words after `nix` that build Chromium into `link`.
+fn nix_build_argv(link: &Path) -> Vec<String> {
+    [
+        "build",
+        &format!("github:NixOS/nixpkgs/{NIXPKGS_REV}#chromium"),
+        "--out-link",
+        &link.to_string_lossy(),
+        "--extra-experimental-features",
+        "nix-command flakes",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// The out-link `nix build` makes in the state folder.
+fn nix_chrome_link(state: &Path) -> PathBuf {
+    state.join("chromium")
+}
+
+fn nix_chrome_bin(state: &Path) -> PathBuf {
+    nix_chrome_link(state).join("bin/chromium")
+}
+
+/// NixOS marks itself with /etc/NIXOS (POINTMAN_BROWSER_NIXOS=1 or 0 overrides it, for tests).
+fn is_nixos() -> bool {
+    match std::env::var("POINTMAN_BROWSER_NIXOS").ok().as_deref() {
+        Some("1") => true,
+        Some("0") => false,
+        _ => Path::new("/etc/NIXOS").exists(),
     }
 }
 
@@ -790,7 +875,9 @@ fn health(x: &Ext) -> Vec<Part> {
                 format!("the Chrome setting names {}, which isn't there", p.display()),
             )
         }
-    } else if std::env::var_os("POINTMAN_BROWSER_CLI").is_some() {
+    } else if std::env::var_os("POINTMAN_BROWSER_CLI").is_some()
+        && !matches!(lock_try(&x.chrome_installing), Some(Some(_)))
+    {
         part("chrome", "browser", "Chrome", State::Ok, vec![], "stand-in".into())
     } else {
         match x.home().ok().and_then(|h| downloaded_chrome(&h)) {
@@ -803,13 +890,16 @@ fn health(x: &Ext) -> Vec<Part> {
                 format!("Chrome {v} (downloaded by agent-browser)"),
             ),
             None => match lock_try(&x.chrome_installing) {
-                None => part("chrome", "browser", "Chrome", State::Unspecified, vec![], "downloading Chrome".into()),
-                Some(Some(e)) => {
-                    let hint = if cfg!(target_os = "linux") {
-                        " On NixOS a downloaded Chrome can't run: set this extension's Chrome setting to a Chromium (programs.chromium or pkgs.chromium)."
+                None => {
+                    let what = if is_nixos() && !x.setting_set("chrome") {
+                        "building Chromium (nix, first call)"
                     } else {
-                        ""
+                        "downloading Chrome"
                     };
+                    part("chrome", "browser", "Chrome", State::Unspecified, vec![], what.into())
+                }
+                Some(Some(e)) => {
+                    let hint = if is_nixos() { " It retries on the next call." } else { "" };
                     part("chrome", "browser", "Chrome", State::Failing, vec![Action::Update], format!("{e}.{hint}"))
                 }
                 Some(None) => part(
@@ -818,7 +908,11 @@ fn health(x: &Ext) -> Vec<Part> {
                     "Chrome",
                     State::Unspecified,
                     vec![Action::Update],
-                    "Chrome downloads at the first call".into(),
+                    if is_nixos() && !x.setting_set("chrome") {
+                        "Chromium is built by nix at the first call".into()
+                    } else {
+                        "Chrome downloads at the first call".into()
+                    },
                 ),
             },
         }
@@ -913,5 +1007,28 @@ mod tests {
         assert_eq!(downloaded_chrome(home.path()), None);
         std::fs::create_dir_all(home.path().join(".agent-browser/browsers/chrome-157.0.8103.38")).unwrap();
         assert_eq!(downloaded_chrome(home.path()).as_deref(), Some("157.0.8103.38"));
+    }
+}
+
+#[cfg(test)]
+mod nix_tests {
+    use super::*;
+
+    #[test]
+    fn the_nixos_chromium_is_the_out_link_in_the_state_folder() {
+        let state = Path::new("/state/browser");
+        assert_eq!(nix_chrome_link(state), Path::new("/state/browser/chromium"));
+        assert_eq!(nix_chrome_bin(state), Path::new("/state/browser/chromium/bin/chromium"));
+    }
+
+    #[test]
+    fn nixos_is_decided_by_etc_nixos_unless_overridden() {
+        // one test, since it sets the process's environment
+        std::env::set_var("POINTMAN_BROWSER_NIXOS", "1");
+        assert!(is_nixos());
+        std::env::set_var("POINTMAN_BROWSER_NIXOS", "0");
+        assert!(!is_nixos());
+        std::env::remove_var("POINTMAN_BROWSER_NIXOS");
+        assert_eq!(is_nixos(), Path::new("/etc/NIXOS").exists());
     }
 }
