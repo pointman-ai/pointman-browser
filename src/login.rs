@@ -69,13 +69,13 @@ impl Login {
             if found.next().is_some() {
                 bail!("the login has {key} twice");
             }
+            if v.is_empty() {
+                bail!("the login's {key} is empty");
+            }
             // a 1-3 character value would blank those letters all over an answer when scrubbed
             let secret = key != "URL";
             if secret && v.chars().count() < MIN_SECRET {
                 bail!("the login's {key} is shorter than {MIN_SECRET} characters");
-            }
-            if v.is_empty() {
-                bail!("the login's {key} is empty");
             }
             Ok(v)
         };
