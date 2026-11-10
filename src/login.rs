@@ -1,9 +1,12 @@
-//! A test login the agent never sees: one vault item, `browser.login.<label>`, holding five `KEY=value` lines. The
+//! A test login the agent never sees: one vault item, `browser.<label>`, holding five `KEY=value` lines. The
 //! extension reads it, sends the Cloudflare Access headers to that one origin, and signs in with the password on
 //! agent-browser's stdin. No value goes into a job's params, an answer or a report.
 
 use anyhow::{bail, Context};
 use serde_json::Value;
+
+/// The shortest value of a secret key: scrubbing a shorter one would mangle answers.
+pub const MIN_SECRET: usize = 8;
 
 pub const KEYS: [&str; 5] = ["URL", "ACCESS_CLIENT_ID", "ACCESS_CLIENT_SECRET", "EMAIL", "PASSWORD"];
 
@@ -38,7 +41,7 @@ pub fn item_name(label: &str) -> anyhow::Result<String> {
     if !ok {
         bail!("login is the label `/browser add` was given (letters, digits, . _ -), such as stagesheep");
     }
-    Ok(format!("browser.login.{label}"))
+    Ok(format!("browser.{label}"))
 }
 
 impl Login {
@@ -65,6 +68,11 @@ impl Login {
             let v = found.next().with_context(|| format!("the login has no {key}"))?.1.clone();
             if found.next().is_some() {
                 bail!("the login has {key} twice");
+            }
+            // a 1-3 character value would blank those letters all over an answer when scrubbed
+            let secret = key != "URL";
+            if secret && v.chars().count() < MIN_SECRET {
+                bail!("the login's {key} is shorter than {MIN_SECRET} characters");
             }
             if v.is_empty() {
                 bail!("the login's {key} is empty");
@@ -152,8 +160,14 @@ mod tests {
 
     #[test]
     fn an_env_record_of_the_same_five_parses() {
-        let rec = serde_json::json!({"kind":"env","vars":{"URL":"https://a.test/x","ACCESS_CLIENT_ID":"i","ACCESS_CLIENT_SECRET":"s","EMAIL":"e@x.y","PASSWORD":"p"}});
+        let rec = serde_json::json!({"kind":"env","vars":{"URL":"https://a.test/x","ACCESS_CLIENT_ID":"id-12345","ACCESS_CLIENT_SECRET":"secret-12","EMAIL":"e@example.y","PASSWORD":"password1"}});
         assert_eq!(Login::parse(&rec.to_string()).unwrap().origin, "https://a.test");
+    }
+
+    #[test]
+    fn a_short_secret_is_refused_by_key() {
+        let e = Login::parse(&PASTE.replace("PASSWORD=hunter2 pass", "PASSWORD=abc")).unwrap_err().to_string();
+        assert!(e.contains("PASSWORD") && e.contains("shorter") && !e.contains("abc"), "{e}");
     }
 
     #[test]
@@ -204,7 +218,7 @@ mod tests {
 
     #[test]
     fn labels_are_plain() {
-        assert_eq!(item_name("stagesheep").unwrap(), "browser.login.stagesheep");
+        assert_eq!(item_name("stagesheep").unwrap(), "browser.stagesheep");
         for bad in ["", "../x", "a b", "-x", "x*"] {
             assert!(item_name(bad).is_err(), "{bad}");
         }

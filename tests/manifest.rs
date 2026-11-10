@@ -29,7 +29,7 @@ fn the_manifest_keeps_to_cores_limits() {
     }
     // the vault: only the test logins, and the form is core's one value with an item named for the extension (manifest.py)
     let secrets: Vec<_> = m["permissions"]["secrets"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
-    assert_eq!(secrets, ["browser.login.*"], "it opens no other vault item");
+    assert_eq!(secrets, ["browser.*"], "it opens no other vault item");
     let forms = m["credentials"].as_array().unwrap();
     assert_eq!(forms.len(), 1);
     let form = &forms[0];
@@ -39,7 +39,19 @@ fn the_manifest_keeps_to_cores_limits() {
         "title and help fit core's limits"
     );
     assert!(chars(&form["placeholder"]) <= 80);
-    assert_eq!(form["item"].as_str(), Some("browser.login.{label}"));
+    assert_eq!(form["item"].as_str(), Some("browser.{label}"));
+    // core's credential item pattern: ^[a-z][a-z0-9_]{1,31}\.([A-Za-z0-9_.-]+|\{label\})$ (manifest.py)
+    let item = form["item"].as_str().unwrap();
+    let (ext_id, rest) = item.split_once('.').unwrap();
+    assert!(
+        ext_id.starts_with(|c: char| c.is_ascii_lowercase())
+            && (2..=32).contains(&ext_id.len())
+            && ext_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            && (rest == "{label}"
+                || rest.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))),
+        "item {item} breaks core's pattern"
+    );
+    assert!(!rest.contains("{label}") || rest == "{label}", "{{label}} is the whole part after the first dot");
     assert_eq!(form["value"].as_str(), Some(browser::login::FORM_PATTERN), "the form's pattern is the code's");
     let add = m["commands"].as_array().unwrap().iter().find(|c| c["slash"].as_str() == Some("add")).unwrap();
     assert_eq!(add["form"].as_str(), form["id"].as_str(), "`/browser add` opens the form");

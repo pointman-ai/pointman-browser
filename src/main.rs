@@ -378,7 +378,7 @@ fn strings(v: &Value, name: &str) -> anyhow::Result<Vec<String>> {
         .collect()
 }
 
-/// Sign `agent`'s session in with the test login `label` (the vault's `browser.login.<label>`), without the agent
+/// Sign `agent`'s session in with the test login `label` (the vault's `browser.<label>`), without the agent
 /// seeing a value: the Cloudflare Access headers go to that one origin (agent-browser scopes `--headers` to it), and
 /// the password goes on agent-browser's stdin, not its argv. The saved profile is deleted again whatever happens.
 fn sign_in(
@@ -415,7 +415,17 @@ fn sign_in(
     };
     let s = |v: &str| v.to_string();
     let result = (|| {
-        step(vec![s("open"), l.url.clone(), s("--headers"), l.access_headers()], None, "opening the sign-in page")?;
+        // the Access token goes in a private config file (agent-browser's `headers` key), never on a command line
+        // where `ps` shows it; the file is gone as soon as the open returns
+        let config = cwd.join(format!("login-{}.json", std::process::id()));
+        write_private(&config, &serde_json::json!({"headers": l.access_headers()}).to_string())?;
+        let opened = step(
+            vec![s("--config"), config.to_string_lossy().to_string(), s("open"), l.url.clone()],
+            None,
+            "opening the sign-in page",
+        );
+        let _ = std::fs::remove_file(&config);
+        opened?;
         step(
             vec![
                 s("auth"),
@@ -435,6 +445,19 @@ fn sign_in(
     let _ = step(vec![s("auth"), s("delete"), profile.clone()], None, "removing the saved login");
     result?;
     Ok(l)
+}
+
+/// A file only this user can read, made with that mode from the start.
+fn write_private(path: &Path, text: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(path).and_then(|mut f| f.write_all(text.as_bytes())).with_context(|| format!("writing {}", path.display()))
 }
 
 /// The `login` param: a label, or none.

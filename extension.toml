@@ -5,7 +5,7 @@
 [extension]
 id = "browser"
 name = "Browser"
-version = "0.1.4"
+version = "0.1.5"
 publisher = "aurelio"
 summary = "Agents drive a headless browser with agent-browser: open pages, read them, click, type and take screenshots."
 node = ">=0.4.0"
@@ -20,7 +20,7 @@ runtime = "binary"
 skill = "SKILLS.md"
 
 [permissions]
-secrets = ["browser.login.*"]    # the test logins James adds with /browser add: the extension signs in with them, the agent never sees them
+secrets = ["browser.*"]    # the test logins James adds with /browser add: the extension signs in with them, the agent never sees them
 network = true                   # agent-browser's pinned release and Chrome, once per version; and the pages agents open
 
 # A test login for a site behind Cloudflare Access with a sign-in form (stagesheep.dev). One pasted value, five lines;
@@ -29,7 +29,7 @@ network = true                   # agent-browser's pinned release and Chrome, on
 id = "login"
 title = "Test login"
 help = "Five lines, one each: URL=https://… (the sign-in page), ACCESS_CLIENT_ID=… and ACCESS_CLIENT_SECRET=… (a Cloudflare Access service token for that site, Zero Trust › Access › Service Auth), EMAIL=… and PASSWORD=… (a staging-only test account). Agents use it by its label and never see it."
-item = "browser.login.{label}"
+item = "browser.{label}"
 value = '''(?s)(?=.*(?:^|\n)\s*URL=https://\S)(?=.*(?:^|\n)\s*ACCESS_CLIENT_ID=\S)(?=.*(?:^|\n)\s*ACCESS_CLIENT_SECRET=\S)(?=.*(?:^|\n)\s*EMAIL=\S)(?=.*(?:^|\n)\s*PASSWORD=\S).+'''
 placeholder = "URL=https://…"
 needed = 0

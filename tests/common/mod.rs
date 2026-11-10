@@ -25,6 +25,11 @@ here=$(dirname "$0")
   echo "leak=${AGENT_BROWSER_SESSION-<none>}"
   for a in "$@"; do echo "arg=$a"; done
 } >> "$here/calls.log"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--config" ]; then cp "$a" "$here/config.seen"; echo "$a" > "$here/config.path"; stat -c %a "$a" > "$here/config.mode" 2>/dev/null || stat -f %Lp "$a" > "$here/config.mode"; fi
+  prev="$a"
+done
 if [ "$1" = "--version" ]; then echo "agent-browser 9.9.9"; exit 0; fi
 words=""; prev=""
 for a in "$@"; do
