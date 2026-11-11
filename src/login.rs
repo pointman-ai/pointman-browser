@@ -1,28 +1,26 @@
-//! A test login the agent never sees: one vault item, `browser.<label>`, holding five `KEY=value` lines. The
-//! extension reads it, sends the Cloudflare Access headers to that one origin, and signs in with the password on
-//! agent-browser's stdin. No value goes into a job's params, an answer or a report.
+//! A test login the agent never sees: one vault item, `browser.<label>`, the record the apps seal from the form's
+//! fields, `{"kind":"env","vars":{…}}`. The extension reads it, sends the Cloudflare Access headers (when the site has
+//! them) to that one origin, and signs in with the password on agent-browser's stdin. No value goes into a job's
+//! params, an answer or a report.
 
 use anyhow::{bail, Context};
 use serde_json::Value;
 
-/// The shortest value of a secret key: scrubbing a shorter one would mangle answers.
+pub const KEYS: [&str; 5] = ["URL", "EMAIL", "PASSWORD", "ACCESS_CLIENT_ID", "ACCESS_CLIENT_SECRET"];
+
+/// The shortest PASSWORD or ACCESS_CLIENT_SECRET: scrubbing a shorter one would blank those letters all over an answer.
 pub const MIN_SECRET: usize = 8;
-
-pub const KEYS: [&str; 5] = ["URL", "ACCESS_CLIENT_ID", "ACCESS_CLIENT_SECRET", "EMAIL", "PASSWORD"];
-
-/// What a `[[credentials]]` form's value must match: each of the five keys on a line of its own with something after
-/// it, and the URL on https. The extension parses strictly again at use, so this only catches a wrong paste early.
-pub const FORM_PATTERN: &str = r"(?s)(?=.*(?:^|\n)\s*URL=https://\S)(?=.*(?:^|\n)\s*ACCESS_CLIENT_ID=\S)(?=.*(?:^|\n)\s*ACCESS_CLIENT_SECRET=\S)(?=.*(?:^|\n)\s*EMAIL=\S)(?=.*(?:^|\n)\s*PASSWORD=\S).+";
 
 #[derive(Clone)]
 pub struct Login {
     pub url: String,
     /// `https://host[:port]`: the one origin the Access headers go to.
     pub origin: String,
-    pub client_id: String,
-    pub client_secret: String,
+    /// Plain: shown as typed in the form, so never scrubbed.
     pub email: String,
     pub password: String,
+    /// The Access service token, both halves or neither: (client id, client secret).
+    pub access: Option<(String, String)>,
 }
 
 /// Never prints a value.
@@ -45,63 +43,58 @@ pub fn item_name(label: &str) -> anyhow::Result<String> {
 }
 
 impl Login {
-    /// Strict: the five keys, once each, no others. The text is the pasted lines, or a vault record
-    /// `{"kind":"env","vars":{…}}` of the same five. Errors name keys, never values.
+    /// Strict: the vault record `{"kind":"env","vars":{…}}` with URL, EMAIL and PASSWORD, and ACCESS_CLIENT_ID with
+    /// ACCESS_CLIENT_SECRET or neither; no other keys. Errors name keys, never values.
     pub fn parse(text: &str) -> anyhow::Result<Login> {
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        let trimmed = text.trim();
-        if trimmed.starts_with('{') {
-            let v: Value =
-                serde_json::from_str(trimmed).map_err(|_| anyhow::anyhow!("the login isn't KEY=value lines"))?;
-            let vars = v["vars"].as_object().context("the login record has no vars")?;
-            for (k, val) in vars {
-                pairs.push((k.clone(), val.as_str().context("a login value isn't text")?.to_string()));
+        let v: Value =
+            serde_json::from_str(text.trim()).map_err(|_| anyhow::anyhow!("the login isn't a vault record"))?;
+        let vars = v["vars"].as_object().context("the login record has no vars")?;
+        for (k, val) in vars {
+            if !KEYS.contains(&k.as_str()) {
+                bail!("the login has a key it doesn't use: {k}");
             }
-        } else {
-            for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-                let (k, v) = line.split_once('=').context("a login line isn't KEY=value")?;
-                pairs.push((k.trim().to_string(), v.trim().to_string()));
+            if !val.is_string() {
+                bail!("the login's {k} isn't text");
             }
         }
-        let get = |key: &str| -> anyhow::Result<String> {
-            let mut found = pairs.iter().filter(|(k, _)| k == key);
-            let v = found.next().with_context(|| format!("the login has no {key}"))?.1.clone();
-            if found.next().is_some() {
-                bail!("the login has {key} twice");
-            }
-            if v.is_empty() {
-                bail!("the login's {key} is empty");
-            }
-            // a 1-3 character value would blank those letters all over an answer when scrubbed
-            let secret = key != "URL";
-            if secret && v.chars().count() < MIN_SECRET {
+        // an empty optional field isn't stored, so an empty value is the same as none
+        let get = |key: &str| vars.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        let need = |key: &str| get(key).map(String::from).with_context(|| format!("the login has no {key}"));
+        let short = |key: &str, v: &str| {
+            if v.chars().count() < MIN_SECRET {
                 bail!("the login's {key} is shorter than {MIN_SECRET} characters");
             }
-            Ok(v)
+            Ok(())
         };
-        let login = Login {
-            url: get("URL")?,
-            origin: String::new(),
-            client_id: get("ACCESS_CLIENT_ID")?,
-            client_secret: get("ACCESS_CLIENT_SECRET")?,
-            email: get("EMAIL")?,
-            password: get("PASSWORD")?,
+        let url = need("URL")?;
+        let email = need("EMAIL")?;
+        let password = need("PASSWORD")?;
+        short("PASSWORD", &password)?;
+        let access = match (get("ACCESS_CLIENT_ID"), get("ACCESS_CLIENT_SECRET")) {
+            (Some(id), Some(secret)) => {
+                short("ACCESS_CLIENT_SECRET", secret)?;
+                Some((id.to_string(), secret.to_string()))
+            }
+            (None, None) => None,
+            (Some(_), None) => bail!("the login has ACCESS_CLIENT_ID but no ACCESS_CLIENT_SECRET: both or neither"),
+            (None, Some(_)) => bail!("the login has ACCESS_CLIENT_SECRET but no ACCESS_CLIENT_ID: both or neither"),
         };
-        if let Some((k, _)) = pairs.iter().find(|(k, _)| !KEYS.contains(&k.as_str())) {
-            bail!("the login has a key it doesn't use: {k}");
-        }
-        let origin = origin_of(&login.url)?;
-        Ok(Login { origin, ..login })
+        let origin = origin_of(&url)?;
+        Ok(Login { url, origin, email, password, access })
     }
 
-    /// The headers Cloudflare Access wants, as agent-browser's `--headers` JSON (scoped by it to the origin).
-    pub fn access_headers(&self) -> String {
-        serde_json::json!({"CF-Access-Client-Id": self.client_id, "CF-Access-Client-Secret": self.client_secret})
-            .to_string()
+    /// The headers Cloudflare Access wants, as agent-browser's `--headers` JSON (scoped by it to the origin); none for a
+    /// site without Access.
+    pub fn access_headers(&self) -> Option<String> {
+        let (id, secret) = self.access.as_ref()?;
+        Some(serde_json::json!({"CF-Access-Client-Id": id, "CF-Access-Client-Secret": secret}).to_string())
     }
 
-    fn secrets(&self) -> [&str; 4] {
-        [&self.client_id, &self.client_secret, &self.email, &self.password]
+    /// The hidden values: the password and the Access secret. The URL, email and client id are plain, shown as typed.
+    fn secrets(&self) -> Vec<&str> {
+        let mut s = vec![self.password.as_str()];
+        s.extend(self.access.iter().map(|(_, secret)| secret.as_str()));
+        s
     }
 
     /// `value` with every secret of this login replaced, in every string, however deep: an answer that echoes one
@@ -148,37 +141,94 @@ pub fn same_origin(url: &str, origin: &str) -> bool {
 mod tests {
     use super::*;
 
-    const PASTE: &str = "URL=https://stage.example.dev/sign-in\nACCESS_CLIENT_ID=abc.access\nACCESS_CLIENT_SECRET=s3cr3t-token\nEMAIL=bot@example.com\nPASSWORD=hunter2 pass\n";
+    fn rec(vars: Value) -> String {
+        serde_json::json!({"kind": "env", "vars": vars}).to_string()
+    }
+
+    fn full() -> Value {
+        serde_json::json!({"URL": "https://stage.example.dev/sign-in", "EMAIL": "bot@example.com", "PASSWORD": "hunter2 pass",
+            "ACCESS_CLIENT_ID": "abc.access", "ACCESS_CLIENT_SECRET": "s3cr3t-token"})
+    }
+
+    fn without(keys: &[&str]) -> String {
+        let mut v = full();
+        for k in keys {
+            v.as_object_mut().unwrap().remove(*k);
+        }
+        rec(v)
+    }
 
     #[test]
-    fn five_lines_parse_and_the_origin_comes_from_the_url() {
-        let l = Login::parse(PASTE).unwrap();
+    fn a_record_with_access_parses_and_the_origin_comes_from_the_url() {
+        let l = Login::parse(&rec(full())).unwrap();
         assert_eq!(l.origin, "https://stage.example.dev");
         assert_eq!(l.password, "hunter2 pass");
+        let h = l.access_headers().unwrap();
+        assert!(h.contains("CF-Access-Client-Id") && h.contains("s3cr3t-token"));
         assert!(!format!("{l:?}").contains("hunter2"));
     }
 
     #[test]
-    fn an_env_record_of_the_same_five_parses() {
-        let rec = serde_json::json!({"kind":"env","vars":{"URL":"https://a.test/x","ACCESS_CLIENT_ID":"id-12345","ACCESS_CLIENT_SECRET":"secret-12","EMAIL":"e@example.y","PASSWORD":"password1"}});
-        assert_eq!(Login::parse(&rec.to_string()).unwrap().origin, "https://a.test");
+    fn a_record_without_access_parses_and_sends_no_headers() {
+        let l = Login::parse(&without(&["ACCESS_CLIENT_ID", "ACCESS_CLIENT_SECRET"])).unwrap();
+        assert!(l.access.is_none() && l.access_headers().is_none());
+        // an optional field left empty isn't stored, and an empty one is the same as none
+        let mut v = full();
+        v["ACCESS_CLIENT_ID"] = "".into();
+        v["ACCESS_CLIENT_SECRET"] = "".into();
+        assert!(Login::parse(&rec(v)).unwrap().access.is_none());
     }
 
     #[test]
-    fn a_short_secret_is_refused_by_key() {
-        let e = Login::parse(&PASTE.replace("PASSWORD=hunter2 pass", "PASSWORD=abc")).unwrap_err().to_string();
-        assert!(e.contains("PASSWORD") && e.contains("shorter") && !e.contains("abc"), "{e}");
+    fn one_access_field_alone_is_refused() {
+        for drop in ["ACCESS_CLIENT_ID", "ACCESS_CLIENT_SECRET"] {
+            let e = Login::parse(&without(&[drop])).unwrap_err().to_string();
+            assert!(e.contains("both or neither") && e.contains(drop), "{e}");
+        }
     }
 
     #[test]
-    fn a_bad_paste_is_refused_without_its_values() {
+    fn a_missing_url_email_or_password_is_refused_by_key() {
+        for k in ["URL", "EMAIL", "PASSWORD"] {
+            let e = Login::parse(&without(&[k])).unwrap_err().to_string();
+            assert!(e.contains(&format!("no {k}")), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_short_password_or_access_secret_is_refused_but_a_short_email_or_id_is_not() {
+        for k in ["PASSWORD", "ACCESS_CLIENT_SECRET"] {
+            let mut v = full();
+            v[k] = "abc".into();
+            let e = Login::parse(&rec(v)).unwrap_err().to_string();
+            assert!(e.contains(k) && e.contains("shorter") && !e.contains("abc"), "{e}");
+        }
+        let mut v = full();
+        v["EMAIL"] = "a@b.c".into();
+        v["ACCESS_CLIENT_ID"] = "id".into();
+        Login::parse(&rec(v)).unwrap();
+    }
+
+    #[test]
+    fn only_the_vault_record_is_read() {
+        let lines = "URL=https://stage.example.dev/sign-in\nEMAIL=bot@example.com\nPASSWORD=hunter2 pass\n";
+        assert!(Login::parse(lines).is_err(), "KEY=value lines are no longer read");
+    }
+
+    #[test]
+    fn a_bad_record_is_refused_without_its_values() {
+        let mut http = full();
+        http["URL"] = "http://stage.example.dev/".into();
+        let mut extra = full();
+        extra["EXTRA"] = "1".into();
+        let mut num = full();
+        num["EMAIL"] = 3.into();
         for (text, why) in [
-            (PASTE.replace("EMAIL=bot@example.com\n", ""), "no EMAIL"),
-            (format!("{PASTE}EXTRA=1\n"), "doesn't use: EXTRA"),
-            (format!("{PASTE}EMAIL=again@x.y\n"), "EMAIL twice"),
-            (PASTE.replace("https://", "http://"), "https://"),
-            (PASTE.replace("PASSWORD=hunter2 pass", "PASSWORD="), "PASSWORD is empty"),
-            ("just words".to_string(), "KEY=value"),
+            (rec(http), "https://"),
+            (rec(extra), "doesn't use: EXTRA"),
+            (rec(num), "EMAIL isn't text"),
+            ("{\"kind\":\"env\"}".to_string(), "no vars"),
+            ("just words".to_string(), "vault record"),
         ] {
             let e = format!("{:#}", Login::parse(&text).unwrap_err());
             assert!(e.contains(why), "{e} should say {why}");
@@ -189,22 +239,15 @@ mod tests {
     }
 
     #[test]
-    fn the_form_pattern_wants_all_five_keys() {
-        // the manifest carries this pattern (tests/manifest.rs); each key has a lookahead of its own
-        for k in KEYS {
-            assert!(FORM_PATTERN.contains(&format!("{k}=")), "{k}");
-        }
-    }
-
-    #[test]
-    fn scrub_removes_every_secret_at_any_depth() {
-        let l = Login::parse(PASTE).unwrap();
-        let mut v = serde_json::json!({"a": "typed hunter2 pass in", "b": [{"c": "id abc.access is not secret", "d": "bot@example.com"}], "e": 3});
+    fn scrub_removes_the_hidden_values_at_any_depth_and_leaves_the_plain_ones() {
+        let l = Login::parse(&rec(full())).unwrap();
+        let mut v = serde_json::json!({"a": "typed hunter2 pass in", "b": [{"c": "id abc.access is plain", "d": "bot@example.com"}], "e": 3, "f": "s3cr3t-token"});
         l.scrub(&mut v);
         let s = v.to_string();
-        for secret in ["hunter2 pass", "bot@example.com", "s3cr3t-token"] {
+        for secret in ["hunter2 pass", "s3cr3t-token"] {
             assert!(!s.contains(secret), "{s}");
         }
+        assert!(s.contains("abc.access") && s.contains("bot@example.com"), "plain values are not scrubbed: {s}");
         assert!(s.contains("***"));
     }
 

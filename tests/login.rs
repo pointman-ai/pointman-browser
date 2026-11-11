@@ -6,11 +6,20 @@ mod common;
 use common::*;
 use serde_json::json;
 
-const PASTE: &str = "URL=https://stage.example.dev/sign-in\nACCESS_CLIENT_ID=abc.access\nACCESS_CLIENT_SECRET=s3cr3t-token\nEMAIL=bot@example.com\nPASSWORD=hunter2 pass\n";
-const SECRETS: [&str; 4] = ["s3cr3t-token", "bot@example.com", "hunter2", "abc.access.s"];
+const SECRETS: [&str; 2] = ["s3cr3t-token", "hunter2"];
 
+fn record(access: bool) -> String {
+    let mut vars = json!({"URL": "https://stage.example.dev/sign-in", "EMAIL": "bot@example.com", "PASSWORD": "hunter2 pass"});
+    if access {
+        vars["ACCESS_CLIENT_ID"] = "abc.access".into();
+        vars["ACCESS_CLIENT_SECRET"] = "s3cr3t-token".into();
+    }
+    json!({"kind": "env", "vars": vars}).to_string()
+}
+
+/// The hidden values: the email and client id are plain, shown as typed, and the stand-in echoes them.
 fn leaks(text: &str) -> Vec<&'static str> {
-    ["s3cr3t-token", "bot@example.com", "hunter2"].into_iter().filter(|s| text.contains(s)).collect()
+    SECRETS.into_iter().filter(|s| text.contains(s)).collect()
 }
 
 fn all_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -27,7 +36,7 @@ fn all_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 #[test]
 fn a_login_signs_the_session_in_and_nothing_comes_back() {
     let fake = Fake::new();
-    let node = node_with_secrets(&fake, json!({}), &[("browser.stagesheep", PASTE)]);
+    let node = node_with_secrets(&fake, json!({}), &[("browser.stagesheep", &record(true))]);
     let done = node
         .run(
             "browser.run",
@@ -73,7 +82,7 @@ fn a_login_signs_the_session_in_and_nothing_comes_back() {
 #[test]
 fn no_value_reaches_params_answers_errors_or_files() {
     let fake = Fake::new();
-    let node = node_with_secrets(&fake, json!({}), &[("browser.stagesheep", PASTE)]);
+    let node = node_with_secrets(&fake, json!({}), &[("browser.stagesheep", &record(true))]);
     // a failed sign-in's error carries none of it, though the CLI's own message did
     std::fs::write(fake.dir.path().join("login-fails"), "").unwrap();
     let e =
@@ -98,7 +107,6 @@ fn no_value_reaches_params_answers_errors_or_files() {
         assert!(leaks(&text).is_empty(), "{} holds a value", f.display());
     }
     assert!(leaks(&ok.result.to_string()).is_empty());
-    let _ = SECRETS;
 }
 
 #[test]
@@ -106,7 +114,7 @@ fn a_run_with_a_login_holds_its_session_and_the_lane() {
     let fake = Fake::new();
     let home = tempfile::tempdir().unwrap();
     let lane = fake_lane(home.path());
-    let node = node_with_secrets(&fake, json!({"lock": lane.to_str().unwrap()}), &[("browser.stagesheep", PASTE)]);
+    let node = node_with_secrets(&fake, json!({"lock": lane.to_str().unwrap()}), &[("browser.stagesheep", &record(true))]);
     let start = node
         .run(
             "browser.test_start",
@@ -123,7 +131,7 @@ fn a_run_with_a_login_holds_its_session_and_the_lane() {
 #[test]
 fn a_missing_or_bad_login_stops_before_anything_is_typed() {
     let fake = Fake::new();
-    let bad = PASTE.replace("EMAIL=bot@example.com\n", "");
+    let bad = record(true).replace("\"EMAIL\":\"bot@example.com\",", "");
     let node = node_with_secrets(&fake, json!({}), &[("browser.broken", &bad)]);
     for (label, why) in [("nope", "no login named nope"), ("broken", "isn't usable"), ("../x", "label")] {
         let e =
@@ -136,15 +144,29 @@ fn a_missing_or_bad_login_stops_before_anything_is_typed() {
 }
 
 #[test]
-fn an_env_record_in_the_vault_works_too() {
+fn a_login_without_access_signs_in_with_no_config_and_no_headers() {
     let fake = Fake::new();
-    let rec =
-        json!({"kind": "env", "vars": {"URL": "https://stage.example.dev/sign-in", "ACCESS_CLIENT_ID": "abc.access",
-        "ACCESS_CLIENT_SECRET": "s3cr3t-token", "EMAIL": "bot@example.com", "PASSWORD": "hunter2 pass"}})
-        .to_string();
-    let node = node_with_secrets(&fake, json!({}), &[("browser.stagesheep", &rec)]);
+    let node = node_with_secrets(&fake, json!({}), &[("browser.plain", &record(false))]);
     let done =
-        node.run("browser.run", json!({"args": ["snapshot"], "agent": "patchbay", "login": "stagesheep"})).unwrap();
+        node.run("browser.run", json!({"args": ["snapshot"], "agent": "patchbay", "login": "plain"})).unwrap();
     assert_eq!(done.result["ok"], true);
+    let words: Vec<_> = fake.calls().iter().map(|c| c.args.join(" ")).collect();
+    assert!(words[0].contains("open https://stage.example.dev/sign-in"), "{words:?}");
+    assert!(!words.iter().any(|w| w.contains("--config") || w.contains("--headers")), "{words:?}");
+    assert!(!fake.dir.path().join("config.seen").exists(), "no config file was made");
+    assert_eq!(std::fs::read_to_string(fake.dir.path().join("stdin.log")).unwrap(), "hunter2 pass");
     assert!(leaks(&done.result.to_string()).is_empty());
+}
+
+#[test]
+fn one_access_field_alone_is_refused_before_anything_is_typed() {
+    let fake = Fake::new();
+    let mut vars = serde_json::from_str::<serde_json::Value>(&record(true)).unwrap();
+    vars["vars"].as_object_mut().unwrap().remove("ACCESS_CLIENT_ID");
+    let node = node_with_secrets(&fake, json!({}), &[("browser.alone", &vars.to_string())]);
+    let e = node.run("browser.run", json!({"args": ["snapshot"], "agent": "patchbay", "login": "alone"})).unwrap_err();
+    let e = format!("{e:#}");
+    assert!(e.contains("isn't usable") && e.contains("ACCESS_CLIENT_ID"), "{e}");
+    assert!(leaks(&e).is_empty(), "{e}");
+    assert!(fake.calls_of("auth").is_empty() && fake.calls_of("open").is_empty());
 }
