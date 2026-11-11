@@ -63,7 +63,7 @@ fn the_manifest_keeps_to_cores_limits() {
         assert!(name.starts_with(|c: char| c.is_ascii_uppercase()) && name.len() <= 64, "{name}");
         assert!(name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'), "{name}");
         assert!((1..=80).contains(&chars(&f["title"])), "{name}'s title");
-        assert!(f.get("placeholder").map_or(true, |p| chars(p) <= 80));
+        assert!(f.get("placeholder").is_none_or(|p| chars(p) <= 80));
     }
     let flag = |n: &str, k: &str| {
         let f = fields.iter().find(|f| f["name"].as_str() == Some(n)).unwrap();

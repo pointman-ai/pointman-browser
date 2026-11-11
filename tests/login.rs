@@ -9,7 +9,8 @@ use serde_json::json;
 const SECRETS: [&str; 2] = ["s3cr3t-token", "hunter2"];
 
 fn record(access: bool) -> String {
-    let mut vars = json!({"URL": "https://stage.example.dev/sign-in", "EMAIL": "bot@example.com", "PASSWORD": "hunter2 pass"});
+    let mut vars =
+        json!({"URL": "https://stage.example.dev/sign-in", "EMAIL": "bot@example.com", "PASSWORD": "hunter2 pass"});
     if access {
         vars["ACCESS_CLIENT_ID"] = "abc.access".into();
         vars["ACCESS_CLIENT_SECRET"] = "s3cr3t-token".into();
@@ -114,7 +115,8 @@ fn a_run_with_a_login_holds_its_session_and_the_lane() {
     let fake = Fake::new();
     let home = tempfile::tempdir().unwrap();
     let lane = fake_lane(home.path());
-    let node = node_with_secrets(&fake, json!({"lock": lane.to_str().unwrap()}), &[("browser.stagesheep", &record(true))]);
+    let node =
+        node_with_secrets(&fake, json!({"lock": lane.to_str().unwrap()}), &[("browser.stagesheep", &record(true))]);
     let start = node
         .run(
             "browser.test_start",
@@ -147,8 +149,7 @@ fn a_missing_or_bad_login_stops_before_anything_is_typed() {
 fn a_login_without_access_signs_in_with_no_config_and_no_headers() {
     let fake = Fake::new();
     let node = node_with_secrets(&fake, json!({}), &[("browser.plain", &record(false))]);
-    let done =
-        node.run("browser.run", json!({"args": ["snapshot"], "agent": "patchbay", "login": "plain"})).unwrap();
+    let done = node.run("browser.run", json!({"args": ["snapshot"], "agent": "patchbay", "login": "plain"})).unwrap();
     assert_eq!(done.result["ok"], true);
     let words: Vec<_> = fake.calls().iter().map(|c| c.args.join(" ")).collect();
     assert!(words[0].contains("open https://stage.example.dev/sign-in"), "{words:?}");
