@@ -58,7 +58,18 @@ impl Login {
             }
         }
         // an empty optional field isn't stored, so an empty value is the same as none
-        let get = |key: &str| vars.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        // the hidden values (PASSWORD, ACCESS_CLIENT_SECRET) are used exactly as stored: trimming only decides whether
+        // one is empty. The plain ones (URL, EMAIL, ACCESS_CLIENT_ID) are trimmed.
+        let get = |key: &str| {
+            let raw = vars.get(key).and_then(Value::as_str)?;
+            if raw.trim().is_empty() {
+                None
+            } else if matches!(key, "PASSWORD" | "ACCESS_CLIENT_SECRET") {
+                Some(raw)
+            } else {
+                Some(raw.trim())
+            }
+        };
         let need = |key: &str| get(key).map(String::from).with_context(|| format!("the login has no {key}"));
         let short = |key: &str, v: &str| {
             if v.chars().count() < MIN_SECRET {
@@ -177,6 +188,24 @@ mod tests {
         v["ACCESS_CLIENT_ID"] = "".into();
         v["ACCESS_CLIENT_SECRET"] = "".into();
         assert!(Login::parse(&rec(v)).unwrap().access.is_none());
+    }
+
+    #[test]
+    fn hidden_values_keep_their_spaces_and_plain_ones_are_trimmed() {
+        let mut v = full();
+        v["URL"] = " https://stage.example.dev/sign-in ".into();
+        v["EMAIL"] = " bot@example.com ".into();
+        v["PASSWORD"] = " hunter2 pass ".into();
+        v["ACCESS_CLIENT_ID"] = " abc.access ".into();
+        v["ACCESS_CLIENT_SECRET"] = " s3cr3t-token ".into();
+        let l = Login::parse(&rec(v)).unwrap();
+        assert_eq!((l.url.as_str(), l.email.as_str()), ("https://stage.example.dev/sign-in", "bot@example.com"));
+        assert_eq!(l.password, " hunter2 pass ");
+        assert_eq!(l.access, Some(("abc.access".to_string(), " s3cr3t-token ".to_string())));
+        // a value of only spaces is still empty
+        let mut v = full();
+        v["PASSWORD"] = "        ".into();
+        assert!(Login::parse(&rec(v)).unwrap_err().to_string().contains("no PASSWORD"));
     }
 
     #[test]

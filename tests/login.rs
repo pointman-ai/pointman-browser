@@ -160,6 +160,18 @@ fn a_login_without_access_signs_in_with_no_config_and_no_headers() {
 }
 
 #[test]
+fn a_password_with_a_trailing_space_reaches_stdin_unchanged() {
+    let fake = Fake::new();
+    let mut vars = serde_json::from_str::<serde_json::Value>(&record(false)).unwrap();
+    vars["vars"]["PASSWORD"] = " hunter2 pass ".into();
+    let node = node_with_secrets(&fake, json!({}), &[("browser.plain", &vars.to_string())]);
+    let done = node.run("browser.run", json!({"args": ["snapshot"], "agent": "patchbay", "login": "plain"})).unwrap();
+    assert_eq!(done.result["ok"], true);
+    assert_eq!(std::fs::read_to_string(fake.dir.path().join("stdin.log")).unwrap(), " hunter2 pass ");
+    assert!(leaks(&done.result.to_string()).is_empty());
+}
+
+#[test]
 fn one_access_field_alone_is_refused_before_anything_is_typed() {
     let fake = Fake::new();
     let mut vars = serde_json::from_str::<serde_json::Value>(&record(true)).unwrap();
