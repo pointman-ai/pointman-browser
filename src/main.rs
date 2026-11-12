@@ -415,15 +415,15 @@ fn sign_in(
     };
     let s = |v: &str| v.to_string();
     let result = (|| {
-        // the Access token goes in a private config file (agent-browser's `headers` key), never on a command line
-        // where `ps` shows it; the file is gone as soon as the open returns
+        // a site behind Cloudflare Access: the token goes in a private config file (agent-browser's `headers` key), never
+        // on a command line where `ps` shows it; the file is gone as soon as the open returns
         let config = cwd.join(format!("login-{}.json", std::process::id()));
-        write_private(&config, &serde_json::json!({"headers": l.access_headers()}).to_string())?;
-        let opened = step(
-            vec![s("--config"), config.to_string_lossy().to_string(), s("open"), l.url.clone()],
-            None,
-            "opening the sign-in page",
-        );
+        let mut open = vec![s("open"), l.url.clone()];
+        if let Some(headers) = l.access_headers() {
+            write_private(&config, &serde_json::json!({"headers": headers}).to_string())?;
+            open.splice(0..0, [s("--config"), config.to_string_lossy().to_string()]);
+        }
+        let opened = step(open, None, "opening the sign-in page");
         let _ = std::fs::remove_file(&config);
         opened?;
         step(

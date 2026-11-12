@@ -38,7 +38,6 @@ fn the_manifest_keeps_to_cores_limits() {
         (1..=80).contains(&chars(&form["title"])) && chars(&form["help"]) <= 400,
         "title and help fit core's limits"
     );
-    assert!(chars(&form["placeholder"]) <= 80);
     assert_eq!(form["item"].as_str(), Some("browser.{label}"));
     // core's credential item pattern: ^[a-z][a-z0-9_]{1,31}\.([A-Za-z0-9_.-]+|\{label\})$ (manifest.py)
     let item = form["item"].as_str().unwrap();
@@ -51,7 +50,29 @@ fn the_manifest_keeps_to_cores_limits() {
         "item {item} breaks core's pattern"
     );
     assert!(!rest.contains("{label}") || rest == "{label}", "{{label}} is the whole part after the first dot");
-    assert_eq!(form["value"].as_str(), Some(browser::login::FORM_PATTERN), "the form's pattern is the code's");
+    // core's rules for a form with fields (MB-912): no value, placeholder or sign_in; 1-12 fields, unique names
+    for k in ["value", "placeholder", "sign_in"] {
+        assert!(form.get(k).is_none(), "a form with fields has no {k}");
+    }
+    let fields = form["fields"].as_array().unwrap();
+    assert!((1..=12).contains(&fields.len()));
+    let names: Vec<_> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    assert_eq!(names, browser::login::KEYS, "the fields are the keys the code reads");
+    for f in fields {
+        let name = f["name"].as_str().unwrap();
+        assert!(name.starts_with(|c: char| c.is_ascii_uppercase()) && name.len() <= 64, "{name}");
+        assert!(name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'), "{name}");
+        assert!((1..=80).contains(&chars(&f["title"])), "{name}'s title");
+        assert!(f.get("placeholder").is_none_or(|p| chars(p) <= 80));
+    }
+    let flag = |n: &str, k: &str| {
+        let f = fields.iter().find(|f| f["name"].as_str() == Some(n)).unwrap();
+        f.get(k).and_then(|v| v.as_bool()).unwrap_or(false)
+    };
+    assert!(flag("URL", "plain") && flag("EMAIL", "plain") && flag("ACCESS_CLIENT_ID", "plain"), "shown as typed");
+    assert!(!flag("PASSWORD", "plain") && !flag("ACCESS_CLIENT_SECRET", "plain"), "hidden");
+    assert!(flag("ACCESS_CLIENT_ID", "optional") && flag("ACCESS_CLIENT_SECRET", "optional"));
+    assert!(!flag("URL", "optional") && !flag("EMAIL", "optional") && !flag("PASSWORD", "optional"));
     let add = m["commands"].as_array().unwrap().iter().find(|c| c["slash"].as_str() == Some("add")).unwrap();
     assert_eq!(add["form"].as_str(), form["id"].as_str(), "`/browser add` opens the form");
     let skill = m["behavior"]["skill"].as_str().unwrap();

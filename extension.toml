@@ -5,7 +5,7 @@
 [extension]
 id = "browser"
 name = "Browser"
-version = "0.1.5"
+version = "0.1.6"
 publisher = "aurelio"
 summary = "Agents drive a headless browser with agent-browser: open pages, read them, click, type and take screenshots."
 node = ">=0.4.0"
@@ -23,16 +23,48 @@ skill = "SKILLS.md"
 secrets = ["browser.*"]    # the test logins James adds with /browser add: the extension signs in with them, the agent never sees them
 network = true                   # agent-browser's pinned release and Chrome, once per version; and the pages agents open
 
-# A test login for a site behind Cloudflare Access with a sign-in form (stagesheep.dev). One pasted value, five lines;
-# the extension sends the Access headers to that one origin and types the password itself.
+# A test login: a sign-in page and a staging-only test account, plus a Cloudflare Access service token when the site
+# sits behind Access. Each is a field of its own: the plain ones are shown as typed, and the apps seal them as one
+# vault record {"kind":"env","vars":{...}} that the extension reads. It sends the Access headers to that one origin
+# and types the password itself.
 [[credentials]]
 id = "login"
 title = "Test login"
-help = "Five lines, one each: URL=https://… (the sign-in page), ACCESS_CLIENT_ID=… and ACCESS_CLIENT_SECRET=… (a Cloudflare Access service token for that site, Zero Trust › Access › Service Auth), EMAIL=… and PASSWORD=… (a staging-only test account). Agents use it by its label and never see it."
+help = "Access only for a site behind Cloudflare Access."
 item = "browser.{label}"
-value = '''(?s)(?=.*(?:^|\n)\s*URL=https://\S)(?=.*(?:^|\n)\s*ACCESS_CLIENT_ID=\S)(?=.*(?:^|\n)\s*ACCESS_CLIENT_SECRET=\S)(?=.*(?:^|\n)\s*EMAIL=\S)(?=.*(?:^|\n)\s*PASSWORD=\S).+'''
-placeholder = "URL=https://…"
 needed = 0
+
+[[credentials.fields]]
+name = "URL"
+title = "Sign-in page"
+value = 'https://\S+'
+placeholder = "https://"
+plain = true
+optional = false
+
+[[credentials.fields]]
+name = "EMAIL"
+title = "Test account email"
+plain = true
+optional = false
+
+[[credentials.fields]]
+name = "PASSWORD"
+title = "Password"
+plain = false
+optional = false
+
+[[credentials.fields]]
+name = "ACCESS_CLIENT_ID"
+title = "Cloudflare Access client ID"
+plain = true
+optional = true
+
+[[credentials.fields]]
+name = "ACCESS_CLIENT_SECRET"
+title = "Cloudflare Access client secret"
+plain = false
+optional = true
 
 [settings]
 type = "object"
