@@ -1,6 +1,6 @@
 [package]
 name = "browser"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
 description = "agent-browser on Pointman's machines: agents drive a headless browser, each in its own session."
 license = "MIT"
@@ -10,9 +10,10 @@ publish = false
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-pointman-extension = { git = "https://github.com/pointman-ai/pointman-extension", tag = "v0.5.1" }
+pointman-extension = { git = "https://github.com/pointman-ai/pointman-extension", rev = "44b8d9975899af426f93559208c3739774d5e59d" }
 serde_json = "1"
 sha2 = "0.10"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 ureq = "2"
 
 [dev-dependencies]

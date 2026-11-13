@@ -5,20 +5,27 @@
 //! in a session named for that agent: its own tabs, cookies and refs, in a clean headless Chrome that's never a
 //! person's browser. Each call runs on a thread of its own and can be cancelled: the CLI is killed.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use browser::cli::{self, Call};
-use browser::login::{self, Login};
-use browser::{install, test};
+use browser::login::{self, How, Login};
+use browser::{install, signin, test, vars};
 use pointman_extension::protocol::output_request::Role;
-use pointman_extension::protocol::{HealthCheckRequest, HealthCheckResponse, HealthFixRequest, HealthFixResponse};
+use pointman_extension::protocol::pane_open_response::{video, Video};
+use pointman_extension::protocol::{
+    credentials_sign_in_response, CredentialsCodeRequest, CredentialsCodeResponse, CredentialsSignInRequest,
+    CredentialsSignInResponse, HealthCheckRequest, HealthCheckResponse, HealthFixRequest, HealthFixResponse,
+    PaneControlRequest, PaneOpenResponse,
+};
 use pointman_extension::v1::health::part::State;
 use pointman_extension::v1::health::{Action, Part};
-use pointman_extension::{Extension, Handle, Job};
+use pointman_extension::v1::PaneInput;
+use pointman_extension::{convert, Extension, Handle, Job, Pane, Refused};
 use serde_json::{json, Value};
 
 const DEFAULT_TIMEOUT: u64 = 60;
@@ -43,6 +50,31 @@ struct Ext {
     /// One run's file is written by one call at a time.
     runs: Mutex<()>,
     counter: AtomicU64,
+    /// The sign-ins people are doing themselves, by core's sign-in id.
+    signins: Mutex<HashMap<String, SignIn>>,
+    /// The logins each agent's session has used, by label, in memory only: a hidden value typed into a page stays
+    /// there, so every later answer from that session is scrubbed of it too, with or without `login`.
+    used: Mutex<HashMap<String, HashMap<String, Login>>>,
+}
+
+impl Ext {
+    /// Every hidden value `agent`'s session has had, scrubbed from `answer`.
+    fn scrub(&self, agent: &str, answer: &mut Value) {
+        for l in lock(&self.used).get(agent).into_iter().flat_map(|m| m.values()) {
+            l.scrub(answer);
+        }
+    }
+
+    fn scrub_text(&self, agent: &str, text: &str) -> String {
+        let mut v = Value::String(text.to_string());
+        self.scrub(agent, &mut v);
+        v.as_str().unwrap_or_default().to_string()
+    }
+
+    /// `agent`'s session has `l` now.
+    fn remember(&self, agent: &str, label: &str, l: &Login) {
+        lock(&self.used).entry(agent.to_string()).or_default().insert(label.to_string(), l.clone());
+    }
 }
 
 fn now() -> u64 {
@@ -378,24 +410,34 @@ fn strings(v: &Value, name: &str) -> anyhow::Result<Vec<String>> {
         .collect()
 }
 
-/// Sign `agent`'s session in with the test login `label` (the vault's `browser.<label>`), without the agent
-/// seeing a value: the Cloudflare Access headers go to that one origin (agent-browser scopes `--headers` to it), and
-/// the password goes on agent-browser's stdin, not its argv. The saved profile is deleted again whatever happens.
+/// The test login `label` (the vault's `browser.<label>`), read and checked. Errors name the label and keys, never a
+/// value.
+fn load_login(x: &Ext, label: &str) -> anyhow::Result<Login> {
+    let item = login::item_name(label)?;
+    let text =
+        x.h.secret(&item)
+            .map_err(|_| anyhow!("there is no login named {label}: James adds one with `/browser add {label}`"))?;
+    Login::parse(&text).map_err(|e| anyhow!("the login {label} isn't usable: {e}"))
+}
+
+/// Sign `agent`'s session in with a test login, without the agent seeing a value, in MB-926's order: a saved session
+/// (STATE) is loaded from a private file that's gone straight after; else URL + EMAIL or USERNAME + PASSWORD sign in
+/// with agent-browser's `auth`, the password on its stdin, never its argv, and the saved profile deleted again
+/// whatever happens; else the URL is opened. The Cloudflare Access headers go to that one origin (agent-browser scopes
+/// `--headers` to it), in a private config file, never on a command line.
 fn sign_in(
     x: &Ext,
     bin: &Path,
     home: &Path,
     agent: &str,
-    label: &str,
+    l: &Login,
     cwd: &Path,
     cancelled: &dyn Fn() -> bool,
-) -> anyhow::Result<Login> {
-    let item = login::item_name(label)?;
-    let text = x
-        .h
-        .secret(&item)
-        .map_err(|_| anyhow::anyhow!("there is no login named {label}: James adds one with `/browser add {label}`"))?;
-    let l = Login::parse(&text).map_err(|e| anyhow::anyhow!("the login {label} isn't usable: {e}"))?;
+) -> anyhow::Result<()> {
+    let how = l.how();
+    if how == How::None {
+        return Ok(());
+    }
     let profile = format!("pb-{agent}");
     let step = |args: Vec<String>, input: Option<&[u8]>, what: &str| -> anyhow::Result<()> {
         let mut argv = vec!["--session".to_string(), agent.to_string(), "--json".to_string()];
@@ -406,7 +448,7 @@ fn sign_in(
         if ran.cancelled {
             bail!(pointman_extension::Cancelled);
         }
-        let env = cli::envelope(&ran).map_err(|e| anyhow::anyhow!("{what}: {}", l.scrub_text(&format!("{e:#}"))))?;
+        let env = cli::envelope(&ran).map_err(|e| anyhow!("{what}: {}", l.scrub_text(&format!("{e:#}"))))?;
         if env["success"].as_bool() == Some(false) || env["ok"].as_bool() == Some(false) {
             let why = env["error"]["message"].as_str().or(env["error"].as_str()).unwrap_or("it failed");
             bail!("{what} failed: {}", l.scrub_text(why));
@@ -414,37 +456,64 @@ fn sign_in(
         Ok(())
     };
     let s = |v: &str| v.to_string();
-    let result = (|| {
-        // a site behind Cloudflare Access: the token goes in a private config file (agent-browser's `headers` key), never
-        // on a command line where `ps` shows it; the file is gone as soon as the open returns
-        let config = cwd.join(format!("login-{}.json", std::process::id()));
-        let mut open = vec![s("open"), l.url.clone()];
-        if let Some(headers) = l.access_headers() {
-            write_private(&config, &serde_json::json!({"headers": headers}).to_string())?;
-            open.splice(0..0, [s("--config"), config.to_string_lossy().to_string()]);
+    let tag = format!("{}-{}", std::process::id(), x.counter.fetch_add(1, Ordering::SeqCst) + 1);
+    // a site behind Cloudflare Access: the token goes in a private config file (agent-browser's `headers` key), never
+    // on a command line where `ps` shows it; the file is gone as soon as the sign-in's opening calls return
+    let config = cwd.join(format!("login-{tag}.json"));
+    let with_access = |mut args: Vec<String>| -> Vec<String> {
+        if l.access.is_some() {
+            args.splice(0..0, [s("--config"), config.to_string_lossy().to_string()]);
         }
-        let opened = step(open, None, "opening the sign-in page");
-        let _ = std::fs::remove_file(&config);
-        opened?;
-        step(
-            vec![
-                s("auth"),
-                s("save"),
-                profile.clone(),
-                s("--url"),
-                l.url.clone(),
-                s("--username"),
-                l.email.clone(),
-                s("--password-stdin"),
-            ],
-            Some(l.password.as_bytes()),
-            "saving the login",
-        )?;
-        step(vec![s("auth"), s("login"), profile.clone()], None, "signing in")
+        args
+    };
+    if let Some(headers) = l.access_headers() {
+        write_private(&config, &json!({"headers": headers}).to_string())?;
+    }
+    let result = (|| match how {
+        How::State => {
+            // the saved session: cookies and storage, from a file only this user reads, deleted straight after
+            let file = cwd.join(format!("state-{tag}.json"));
+            write_private(&file, l.state().unwrap_or_default())?;
+            let loaded = step(
+                with_access(vec![s("state"), s("load"), file.to_string_lossy().to_string()]),
+                None,
+                "loading the saved session",
+            );
+            let _ = std::fs::remove_file(&file);
+            loaded?;
+            match l.url() {
+                Some(url) => step(with_access(vec![s("open"), url.to_string()]), None, "opening the site"),
+                None => Ok(()),
+            }
+        }
+        How::Password => {
+            let url = l.url().unwrap_or_default().to_string();
+            step(with_access(vec![s("open"), url.clone()]), None, "opening the sign-in page")?;
+            let saved = step(
+                vec![
+                    s("auth"),
+                    s("save"),
+                    profile.clone(),
+                    s("--url"),
+                    url,
+                    s("--username"),
+                    l.user().unwrap_or_default().to_string(),
+                    s("--password-stdin"),
+                ],
+                Some(l.password().unwrap_or_default().as_bytes()),
+                "saving the login",
+            )
+            .and_then(|_| step(vec![s("auth"), s("login"), profile.clone()], None, "signing in"));
+            let _ = step(vec![s("auth"), s("delete"), profile.clone()], None, "removing the saved login");
+            saved
+        }
+        How::Open => {
+            step(with_access(vec![s("open"), l.url().unwrap_or_default().to_string()]), None, "opening the site")
+        }
+        How::None => Ok(()),
     })();
-    let _ = step(vec![s("auth"), s("delete"), profile.clone()], None, "removing the saved login");
-    result?;
-    Ok(l)
+    let _ = std::fs::remove_file(&config);
+    result
 }
 
 /// A file only this user can read, made with that mode from the start.
@@ -469,14 +538,26 @@ fn login_label(job: &Job) -> anyhow::Result<Option<String>> {
     }
 }
 
-/// browser.run: one agent-browser command in the agent's own session, its envelope back, a screenshot posted.
+/// The `agent` param as its session's name: the agent's handle, never a sign-in's session.
+fn agent_session(job: &Job, what: &str) -> anyhow::Result<String> {
+    let agent = cli::session_name(job.params["agent"].as_str())
+        .with_context(|| format!("agent is your handle, with letters or digits: {what}"))?;
+    if signin::is_signin_session(&agent) {
+        bail!("agent is your handle: sessions named {}… are the sign-in pane's, never an agent's", signin::PREFIX);
+    }
+    Ok(agent)
+}
+
+/// browser.run: one agent-browser command in the agent's own session, its envelope back, a screenshot posted. With a
+/// login, the session is signed in first and `{{NAME}}` in args is that login's value (src/vars.rs).
 fn run(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let args = strings(&job.params["args"], "args")?;
     if args.is_empty() {
         bail!("args is empty: the words after `agent-browser`, [\"open\", \"https://example.com\"]");
     }
     std::fs::create_dir_all(&job.work).with_context(|| format!("making {}", job.work.display()))?;
-    if let Some(why) = cli::refused(&args, &job.work, &|p: &Path| x.h.allowed(p)) {
+    let allowed = |p: &Path| x.h.allowed(p);
+    if let Some(why) = cli::refused(&args, &job.work, &allowed) {
         bail!(why);
     }
     if cli::wants_headed(&args) && !x.setting("headed", false) {
@@ -486,27 +567,48 @@ fn run(x: &Ext, job: &Job) -> anyhow::Result<Value> {
             x.h.machine()
         );
     }
-    let agent = cli::session_name(job.params["agent"].as_str()).context(
-        "agent is your handle, with letters or digits: each agent has its own browser session, named for it",
-    )?;
+    let agent = agent_session(job, "each agent has its own browser session, named for it")?;
     let timeout = Duration::from_secs(job.params["timeout"].as_u64().unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT));
 
     let label = login_label(job)?;
+    let signed = label.as_deref().map(|l| load_login(x, l)).transpose()?;
+    // the login's values go in now, so a name it hasn't got, or a hidden value out of place, stops the run before
+    // anything reaches the browser
+    let (args, hidden) = vars::fill_in(&args, label.as_deref().zip(signed.as_ref()))?;
+    if let Some(l) = &signed {
+        if let Some(why) = cli::refused(&args, &job.work, &allowed) {
+            bail!("with the login's values put in: {}", l.scrub_text(&why));
+        }
+    }
+    if let (Some(label), Some(l)) = (&label, &signed) {
+        x.remember(&agent, label, l);
+    }
+    let scrubbed = |e: anyhow::Error| anyhow!("{}", x.scrub_text(&agent, &format!("{e:#}")));
     job.progress(None, "agent-browser");
     let bin = x.cli()?;
     x.ensure_chrome()?;
     let home = x.home()?;
     std::fs::create_dir_all(&job.work).with_context(|| format!("making {}", job.work.display()))?;
-    let signed = match &label {
-        Some(l) => {
-            job.progress(None, "signing in");
-            Some(sign_in(x, &bin, &home, &agent, l, &job.work, &|| job.cancelled())?)
+    if let Some(l) = &signed {
+        job.progress(None, "signing in");
+        sign_in(x, &bin, &home, &agent, l, &job.work, &|| job.cancelled())?;
+    }
+    if hidden {
+        // a hidden value is typed only on the login's own site
+        let origin = signed.as_ref().and_then(|l| l.origin.clone()).unwrap_or_default();
+        let get = ["get".to_string(), "url".to_string()];
+        let (page, _) =
+            call(x, &bin, &home, &agent, &get, &job.work, QUICK, false, &|| job.cancelled()).map_err(scrubbed)?;
+        let url = page["data"]["url"].as_str().unwrap_or_default();
+        if !login::same_origin(url, &origin) {
+            let on = login::origin_of(url).unwrap_or_else(|_| "no https page".into());
+            bail!("a hidden value is typed only on {origin}, and the page is on {on}: open the login's site first");
         }
-        None => None,
-    };
+    }
     let before = files_in(&job.work);
 
-    let (mut env, command) = call(x, &bin, &home, &agent, &args, &job.work, timeout, &|| job.cancelled())?;
+    let (mut env, command) =
+        call(x, &bin, &home, &agent, &args, &job.work, timeout, hidden, &|| job.cancelled()).map_err(scrubbed)?;
     if env["error"].is_null() {
         env["error"] = Value::Null;
     }
@@ -521,6 +623,9 @@ fn run(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     }
     let text = cli::summary(&command, &env);
     let mut answer = env;
+    // agent-browser echoes typed text, and a page keeps what was typed: nothing hidden this session has had leaves in
+    // an answer, or its overflow file
+    x.scrub(&agent, &mut answer);
     let size = answer.to_string().len();
     if size > ANSWER_MAX {
         let name = format!("{}.json", file_stem(&command));
@@ -534,18 +639,20 @@ fn run(x: &Ext, job: &Job) -> anyhow::Result<Value> {
         Some(p) => format!("{text}: posted {}", name_of(&p)),
         None => text,
     });
+    x.scrub(&agent, &mut answer);
     answer["session"] = Value::String(agent);
     answer["machine"] = Value::String(x.h.machine());
     if let Some(l) = &signed {
-        // agent-browser echoes typed text and URLs: nothing of the login leaves in an answer
-        l.scrub(&mut answer);
         answer["login"] = Value::String(label.clone().unwrap_or_default());
+        answer["vars"] = l.vars_answer();
+        answer["signed_in"] = json!(l.how().word());
     }
     Ok(answer)
 }
 
 /// One call in `agent`'s session: `agent-browser --session <agent> --json <args>`. Returns its envelope and the
-/// command's name (the first word that isn't a flag).
+/// command's name (the first word that isn't a flag). `on_stdin`: the command goes on agent-browser's stdin as a
+/// one-command `batch`, so a hidden value in it is in no argv `ps` shows.
 #[allow(clippy::too_many_arguments)]
 fn call(
     x: &Ext,
@@ -555,17 +662,24 @@ fn call(
     args: &[String],
     cwd: &Path,
     timeout: Duration,
+    on_stdin: bool,
     cancelled: &dyn Fn() -> bool,
 ) -> anyhow::Result<(Value, String)> {
     let mut argv = vec!["--session".to_string(), agent.to_string(), "--json".to_string()];
-    argv.extend(args.iter().cloned());
+    let input = if on_stdin {
+        argv.extend(["batch", "--json", "--omit-command"].map(String::from));
+        Some(serde_json::to_vec(&[args])?)
+    } else {
+        argv.extend(args.iter().cloned());
+        None
+    };
     let vars = x.env(home)?;
     let c = Call { bin, argv: &argv, env: &vars, cwd, timeout };
-    let ran = cli::run(&c, cancelled)?;
+    let ran = cli::run_with_input(&c, input.as_deref(), cancelled)?;
     if ran.cancelled {
         bail!(pointman_extension::Cancelled);
     }
-    let env = cli::envelope(&ran)?;
+    let env = if on_stdin { cli::batch_envelope(&ran)? } else { cli::envelope(&ran)? };
     let command = args.iter().find(|a| !a.starts_with('-')).cloned().unwrap_or_else(|| "agent-browser".into());
     Ok((env, command))
 }
@@ -588,9 +702,9 @@ fn file_stem(command: &str) -> String {
 /// browser.add: the apps' form for a test login seals its value into the vault, so there is nothing for the
 /// extension to do; this is the command the form hangs from.
 fn add(_x: &Ext, _job: &Job) -> anyhow::Result<Value> {
-    Ok(
-        json!({"ok": true, "text": "Add a test login with /browser add <label> in the app: five KEY=value lines, kept in the vault."}),
-    )
+    Ok(json!({"ok": true, "text": "Add a test login with /browser add <label> in the app: name its values (URL, \
+        EMAIL, PASSWORD…), each shown or hidden, or sign in yourself in the browser pane. Agents use it as login, and \
+        its values as {{NAME}}."}))
 }
 
 /// browser.status: agent-browser's version, the Chrome it uses, and the open sessions.
@@ -649,9 +763,9 @@ fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
     let name = name.context("name is what the run is called: \"Spacesheep staging: sign in\"")?;
     let markdown = job.params["checklist"].as_str().context("checklist is markdown: one `- ` line a step")?;
     let steps = test::parse_checklist(markdown)?;
-    let agent = cli::session_name(job.params["agent"].as_str())
-        .context("agent is your handle, with letters or digits: the run uses your own browser session")?;
+    let agent = agent_session(job, "the run uses your own browser session")?;
     let label = login_label(job)?;
+    let signed = label.as_deref().map(|l| load_login(x, l)).transpose()?;
     let state = x.state();
     test_prune(&state);
     // a run this agent left open gives up its lane first
@@ -673,16 +787,17 @@ fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
         run["lane"] = json!(script.to_string_lossy());
         run["lane_at"] = json!(now());
     }
-    if let Some(l) = &label {
+    if let (Some(label), Some(l)) = (&label, &signed) {
         job.progress(None, "signing in");
-        let signed = x.cli().and_then(|bin| {
+        let done = x.cli().and_then(|bin| {
             x.ensure_chrome()?;
             let home = x.home()?;
             std::fs::create_dir_all(&job.work)?;
             sign_in(x, &bin, &home, &agent, l, &job.work, &|| job.cancelled())
         });
-        match signed {
-            Ok(_) => run["login"] = json!(l),
+        x.remember(&agent, label, l);
+        match done {
+            Ok(_) => run["login"] = json!(label),
             Err(e) => {
                 if let Some(script) = x.lane() {
                     let _ = x.release_lane(&script, &agent);
@@ -704,9 +819,13 @@ fn test_start(x: &Ext, job: &Job) -> anyhow::Result<Value> {
         if steps.len() == 1 { "" } else { "s" },
         if run["lane"].is_null() { "" } else { ", holding the heavy-job lane until finish" }
     );
-    Ok(
-        json!({"ok": true, "run": id, "steps": steps.iter().map(|s| json!({"text": s.text, "expect": s.expect})).collect::<Vec<_>>(), "text": text, "machine": x.h.machine()}),
-    )
+    let mut answer = json!({"ok": true, "run": id, "steps": steps.iter().map(|s| json!({"text": s.text, "expect": s.expect})).collect::<Vec<_>>(), "text": text, "machine": x.h.machine()});
+    if let (Some(label), Some(l)) = (&label, &signed) {
+        answer["login"] = json!(label);
+        answer["vars"] = l.vars_answer();
+        answer["signed_in"] = json!(l.how().word());
+    }
+    Ok(answer)
 }
 
 fn save_run(dir: &Path, run: &Value) -> anyhow::Result<()> {
@@ -846,12 +965,13 @@ fn test_step(x: &Ext, job: &Job) -> anyhow::Result<Value> {
         let home = x.home()?;
         let to = dir.join(format!("step-{n}.png"));
         let args = vec!["screenshot".to_string(), to.to_string_lossy().to_string()];
-        match call(x, &bin, &home, &agent, &args, &job.work, Duration::from_secs(60), &|| job.cancelled()) {
+        match call(x, &bin, &home, &agent, &args, &job.work, Duration::from_secs(60), false, &|| job.cancelled()) {
             Ok((env, _)) if env["ok"] == true && to.is_file() => {
                 shot = Some(to);
                 // the page it was on, for the report's lead
                 if run["url"].is_null() {
-                    let url = call(x, &bin, &home, &agent, &["get".into(), "url".into()], &job.work, QUICK, &|| false);
+                    let url =
+                        call(x, &bin, &home, &agent, &["get".into(), "url".into()], &job.work, QUICK, false, &|| false);
                     if let Ok((u, _)) = url {
                         if let Some(u) = u["data"]["url"].as_str().filter(|u| u.starts_with("http")) {
                             run["url"] = json!(u);
@@ -947,6 +1067,459 @@ fn test_finish(x: &Ext, job: &Job) -> anyhow::Result<Value> {
         "ok": true, "run": id, "passed": c.passed, "failed": c.failed, "skipped": c.skipped, "steps": steps.len(),
         "report": "report.html", "bytes": html.len(), "took": took, "text": text, "machine": x.h.machine(),
     }))
+}
+
+// ------------------------------------------------------------------ sign in yourself (EXT-156)
+
+/// A sign-in the person does themselves in a session of the extension's own (`signin-<id>`, never an agent's), shown
+/// in the `signin` pane. It ends with Save, the pane's close, or 15 minutes idle, and its files go with it.
+struct SignIn {
+    session: String,
+    /// The sign-in page's host, for the pane's title.
+    site: String,
+    /// Who started it: only they see its pane.
+    person: (String, String),
+    /// Its folder: `<state>/signins/<session>`, the saved state while Save runs.
+    dir: PathBuf,
+    /// agent-browser's stream for the session, on 127.0.0.1.
+    port: u16,
+    last: u64,
+    control: signin::Control,
+    stream: Option<Arc<Stream>>,
+    pane: Option<Pane>,
+}
+
+/// The session's stream (agent-browser's WebSocket): frames come in, input goes out.
+struct Stream {
+    ws: Mutex<tungstenite::WebSocket<std::net::TcpStream>>,
+    stop: AtomicBool,
+    /// The page's size in CSS pixels, from the last frame: where 0-1 of the picture lands.
+    size: Mutex<(f64, f64)>,
+}
+
+impl Stream {
+    fn connect(port: u16, fps: u32) -> anyhow::Result<Stream> {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let tcp = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+            .with_context(|| format!("the sign-in's stream on port {port}"))?;
+        tcp.set_read_timeout(Some(Duration::from_secs(5)))?;
+        tcp.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let (ws, _) = tungstenite::client::client(format!("ws://127.0.0.1:{port}/?maxFps={fps}"), tcp)
+            .map_err(|e| anyhow!("the sign-in's stream: {e}"))?;
+        // short reads from here: input waits at most this long for the reader to let go
+        ws.get_ref().set_read_timeout(Some(Duration::from_millis(40)))?;
+        Ok(Stream { ws: Mutex::new(ws), stop: AtomicBool::new(false), size: Mutex::new(signin::VIEWPORT) })
+    }
+
+    fn send(&self, message: &Value) -> anyhow::Result<()> {
+        lock(&self.ws).send(tungstenite::Message::text(message.to_string())).map_err(|e| anyhow!("the stream: {e}"))
+    }
+
+    fn live(&self) -> bool {
+        !self.stop.load(Ordering::SeqCst)
+    }
+}
+
+/// Frames from the stream to the pane, while someone watches, until it stops.
+fn pump(stream: Arc<Stream>, pane: Pane) {
+    use base64::Engine as _;
+    while stream.live() && pane.closed().is_none() {
+        let read = lock(&stream.ws).read();
+        match read {
+            Ok(tungstenite::Message::Text(text)) => {
+                let Ok(v) = serde_json::from_str::<Value>(text.as_str()) else { continue };
+                if v["type"] != "frame" {
+                    continue;
+                }
+                let m = &v["metadata"];
+                let (Some(w), Some(h)) = (m["deviceWidth"].as_f64(), m["deviceHeight"].as_f64()) else { continue };
+                if w > 0.0 && h > 0.0 {
+                    *lock(&stream.size) = (w, h);
+                }
+                let Some(data) = v["data"].as_str() else { continue };
+                let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(data) else { continue };
+                let Some((pw, ph)) = signin::jpeg_size(&jpeg) else { continue };
+                if pane.viewers() > 0 {
+                    let at = m["timestamp"].as_f64().map_or_else(|| now() * 1000, |t| t as u64);
+                    pane.frame(&jpeg, pw, ph, at);
+                }
+            }
+            Ok(tungstenite::Message::Close(_)) => break,
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(e))
+                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) => {
+                pane.handle().log(format!("pane {}: the sign-in's stream ended: {e}", pane.id()));
+                break;
+            }
+        }
+    }
+    stream.stop.store(true, Ordering::SeqCst);
+}
+
+/// The sign-in session's environment: the extension's, with the stream's frames sized for the pane, and the
+/// browser's own idle stop a little after the extension's.
+fn signin_env(x: &Ext, home: &Path) -> anyhow::Result<Vec<(String, String)>> {
+    let mut env = x.env(home)?;
+    for (k, v) in [
+        ("AGENT_BROWSER_STREAM_QUALITY", "70"),
+        ("AGENT_BROWSER_STREAM_MAX_WIDTH", "1280"),
+        ("AGENT_BROWSER_STREAM_MAX_HEIGHT", "720"),
+        ("AGENT_BROWSER_IDLE_TIMEOUT_MS", "1200000"),
+    ] {
+        env.push((k.to_string(), v.to_string()));
+    }
+    Ok(env)
+}
+
+/// One call in a sign-in's session, its envelope back; `ok: false` is an error with agent-browser's message.
+fn signin_call(x: &Ext, session: &str, args: &[&str], timeout: Duration) -> anyhow::Result<Value> {
+    let bin = x.cli()?;
+    let home = x.home()?;
+    let mut argv = vec!["--session".to_string(), session.to_string(), "--json".to_string()];
+    argv.extend(args.iter().map(|a| a.to_string()));
+    let env = signin_env(x, &home)?;
+    let c = Call { bin: &bin, argv: &argv, env: &env, cwd: &home, timeout };
+    let got = cli::envelope(&cli::run(&c, &|| false)?)?;
+    if got["ok"] != true {
+        bail!("{}", cli::summary(args.first().copied().unwrap_or("agent-browser"), &got));
+    }
+    Ok(got)
+}
+
+/// The same person: by id when both have one, else by name.
+fn same_person(a: &(String, String), b: &(String, String)) -> bool {
+    if !a.0.is_empty() && !b.0.is_empty() {
+        a.0 == b.0
+    } else {
+        !a.1.is_empty() && a.1 == b.1
+    }
+}
+
+fn the_form(form: &str) -> anyhow::Result<()> {
+    match form {
+        "login" => Ok(()),
+        other => bail!("browser has one sign-in form, login, not {}", if other.is_empty() { "none" } else { other }),
+    }
+}
+
+/// `credentials.sign_in` with `start`: a session of its own opens the sign-in page, and the answer is the pane to show
+/// it in, with what to tell the person.
+fn credentials_sign_in(x: &Ext, req: &CredentialsSignInRequest) -> anyhow::Result<CredentialsSignInResponse> {
+    the_form(&req.form)?;
+    login::item_name(&req.label)?;
+    // only the person it's for may watch and drive it: a sign-in with no person is refused, never open to anyone
+    let person = req.person.as_option().map(|p| (p.id.clone(), p.name.clone())).unwrap_or_default();
+    if person.0.is_empty() && person.1.is_empty() {
+        bail!("a sign-in is for one person, and this one came with none");
+    }
+    let id = req.session.as_option().map(|s| s.id.clone()).unwrap_or_default();
+    let session = signin::session_name(&id)?;
+    let start = req.start.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let start = start.context("Sign in yourself starts at the site's sign-in page: give its https link")?;
+    if start.len() > 2048 {
+        bail!("the sign-in page's link is longer than 2048 characters");
+    }
+    let site = login::origin_of(start).map_err(|_| anyhow!("the sign-in page must be an https link"))?;
+    let site = site.trim_start_matches("https://").to_string();
+    let pane = credentials_sign_in_response::Pane {
+        open: "signin".into(),
+        target: convert::to_struct(&json!({"session": id})).into(),
+        ..Default::default()
+    };
+    let answer =
+        CredentialsSignInResponse { pane: pane.into(), prompt: Some(signin::prompt(start)), ..Default::default() };
+    {
+        let mut open = lock(&x.signins);
+        if let Some(s) = open.get_mut(&id) {
+            // the same sign-in asked again: the same pane
+            s.last = now();
+            return Ok(answer);
+        }
+        if open.len() >= signin::OPEN_MAX {
+            bail!("{} sign-ins are open on {} already: finish or cancel one first", open.len(), x.h.machine());
+        }
+    }
+    x.cli()?;
+    x.ensure_chrome()?;
+    let dir = x.state().join("signins").join(&session);
+    private_dir(&dir)?;
+    std::fs::write(dir.join("session"), &session)?;
+    let started = (|| {
+        signin_call(x, &session, &["open", start], Duration::from_secs(90))?;
+        let mut status = signin_call(x, &session, &["stream", "status"], QUICK)?;
+        if status["data"]["enabled"] != true {
+            signin_call(x, &session, &["stream", "enable"], QUICK)?;
+            status = signin_call(x, &session, &["stream", "status"], QUICK)?;
+        }
+        status["data"]["port"]
+            .as_u64()
+            .and_then(|p| u16::try_from(p).ok())
+            .filter(|p| *p > 0)
+            .context("agent-browser gave the sign-in no stream port")
+    })();
+    let port = match started {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = signin_call(x, &session, &["close"], QUICK);
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e.context("starting the sign-in"));
+        }
+    };
+    let s = SignIn {
+        session: session.clone(),
+        site,
+        person,
+        dir,
+        port,
+        last: now(),
+        control: signin::Control::default(),
+        stream: None,
+        pane: None,
+    };
+    lock(&x.signins).insert(id, s);
+    x.h.log(format!("{session}: started"));
+    Ok(answer)
+}
+
+/// `credentials.code` "save": the session's cookies and storage, with the origin it's on, as the login's record. The
+/// sign-in ends after; a page that isn't on an https site yet keeps it open, to sign in and Save again.
+fn credentials_code(x: &Ext, req: &CredentialsCodeRequest) -> anyhow::Result<CredentialsCodeResponse> {
+    the_form(&req.form)?;
+    let id = req.session.as_option().map(|s| s.id.clone()).unwrap_or_default();
+    if req.code != "save" {
+        bail!("this sign-in is kept with Save, beside its pane");
+    }
+    let (session, dir) = {
+        let mut open = lock(&x.signins);
+        let s = open
+            .get_mut(&id)
+            .context("this sign-in has ended (cancelled, closed, or 15 minutes idle): start it again")?;
+        s.last = now();
+        (s.session.clone(), s.dir.clone())
+    };
+    let page = signin_call(x, &session, &["get", "url"], QUICK)?;
+    let url = page["data"]["url"].as_str().unwrap_or_default();
+    let origin =
+        login::origin_of(url).map_err(|_| anyhow!("the pane isn't on an https site yet: sign in, then Save"))?;
+    let file = dir.join("state.json");
+    let path = file.to_string_lossy().to_string();
+    let saved = signin_call(x, &session, &["state", "save", path.as_str()], QUICK)
+        .and_then(|_| std::fs::read_to_string(&file).context("agent-browser saved no state"));
+    let _ = std::fs::remove_file(&file);
+    let (value, note) = signin::record(&origin, &saved?)?;
+    signin_end(x, &id, "saved", true);
+    if let Some(note) = &note {
+        x.h.log(format!("{session}: {note}"));
+    }
+    Ok(CredentialsCodeResponse { value, note, ..Default::default() })
+}
+
+/// The sign-in is over: its stream, its pane (unless the pane's close is why), its session and its folder go.
+fn signin_end(x: &Ext, id: &str, reason: &str, close_pane: bool) {
+    let Some(s) = lock(&x.signins).remove(id) else { return };
+    if let Some(stream) = &s.stream {
+        stream.stop.store(true, Ordering::SeqCst);
+    }
+    if close_pane {
+        if let Some(p) = &s.pane {
+            p.close(reason);
+        }
+    }
+    let _ = signin_call(x, &s.session, &["close"], QUICK);
+    let _ = std::fs::remove_dir_all(&s.dir);
+    x.h.log(format!("{}: ended ({reason})", s.session));
+}
+
+/// How long a sign-in may sit untouched (POINTMAN_BROWSER_SIGNIN_IDLE_SECS shortens it, for the tests).
+fn idle_secs() -> u64 {
+    std::env::var("POINTMAN_BROWSER_SIGNIN_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(signin::IDLE_SECS)
+}
+
+/// How often the sweeper looks (POINTMAN_BROWSER_SWEEP_SECS, for the tests).
+fn sweep_secs() -> u64 {
+    std::env::var("POINTMAN_BROWSER_SWEEP_SECS").ok().and_then(|s| s.parse().ok()).filter(|s| *s > 0).unwrap_or(60)
+}
+
+/// Sign-ins untouched for 15 minutes end.
+fn signin_sweep(x: &Ext) {
+    let idle: Vec<String> = lock(&x.signins)
+        .iter()
+        .filter(|(_, s)| now().saturating_sub(s.last) >= idle_secs())
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in idle {
+        signin_end(x, &id, "15 minutes idle", true);
+    }
+}
+
+/// Sign-ins a previous run of the extension left (it stopped, or the machine did): their sessions and folders go.
+fn signin_leftovers(x: &Ext) {
+    let Ok(entries) = std::fs::read_dir(x.state().join("signins")) else { return };
+    for e in entries.flatten() {
+        if let Ok(session) = std::fs::read_to_string(e.path().join("session")) {
+            if signin::is_signin_session(session.trim()) {
+                let _ = signin_call(x, session.trim(), &["close"], QUICK);
+            }
+        }
+        let _ = std::fs::remove_dir_all(e.path());
+    }
+}
+
+/// The sign-in's stream, connected now if it isn't, with its frames going to `pane`.
+fn signin_stream(x: &Ext, id: &str) -> anyhow::Result<Arc<Stream>> {
+    let (port, pane) = {
+        let open = lock(&x.signins);
+        let s = open.get(id).context("the sign-in has ended")?;
+        if let Some(st) = s.stream.as_ref().filter(|st| st.live()) {
+            return Ok(st.clone());
+        }
+        (s.port, s.pane.clone().context("the sign-in's pane isn't open")?)
+    };
+    let stream = Arc::new(Stream::connect(port, 10)?);
+    let mut open = lock(&x.signins);
+    let s = open.get_mut(id).context("the sign-in has ended")?;
+    if let Some(st) = s.stream.as_ref().filter(|st| st.live()) {
+        stream.stop.store(true, Ordering::SeqCst);
+        return Ok(st.clone());
+    }
+    s.stream = Some(stream.clone());
+    let feed = stream.clone();
+    std::thread::spawn(move || pump(feed, pane));
+    Ok(stream)
+}
+
+/// The stream stops when nobody watches and nobody controls it: no frames are made for no one.
+fn signin_quiet(x: &Ext, id: &str, viewers: u64) {
+    let mut open = lock(&x.signins);
+    let Some(s) = open.get_mut(id) else { return };
+    if viewers == 0 && !s.control.granted(now()) {
+        if let Some(st) = s.stream.take() {
+            st.stop.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+fn send_all(stream: &Stream, messages: &[Value]) -> anyhow::Result<()> {
+    messages.iter().try_for_each(|m| stream.send(m))
+}
+
+/// The `signin` pane: the sign-in's page as mjpeg frames, while someone watches; the person's pointer, scroll, keys
+/// and paste go to its page while they hold Control.
+fn signin_open(x: &Arc<Ext>, pane: &Pane) -> anyhow::Result<PaneOpenResponse> {
+    let id = pane.target()["session"].as_str().unwrap_or_default().to_string();
+    let viewer = pane.viewer().person.as_option().map(|p| (p.id.clone(), p.name.clone())).unwrap_or_default();
+    {
+        let mut open = lock(&x.signins);
+        let s = open.get_mut(&id).ok_or_else(|| {
+            Refused::new(
+                "no such sign-in on this machine: it ended, or never started here. Start it again from the form",
+            )
+        })?;
+        if !same_person(&s.person, &viewer) {
+            return Err(Refused::new("this sign-in is someone else's").into());
+        }
+        if let Some(old) = s.pane.replace(pane.clone()) {
+            old.close("opened again");
+        }
+        if let Some(st) = s.stream.take() {
+            st.stop.store(true, Ordering::SeqCst);
+        }
+        s.last = now();
+    }
+    let (xv, iv) = (x.clone(), id.clone());
+    pane.on_viewers(move |_: &Pane, attached: u64| -> anyhow::Result<()> {
+        if let Some(s) = lock(&xv.signins).get_mut(&iv) {
+            s.last = now();
+        }
+        if attached > 0 {
+            signin_stream(&xv, &iv)?;
+        } else {
+            signin_quiet(&xv, &iv, 0);
+        }
+        Ok(())
+    });
+    let (xc, ic) = (x.clone(), id.clone());
+    pane.on_control(move |pane: &Pane, grant: Option<&PaneControlRequest>| -> anyhow::Result<()> {
+        let until = match grant {
+            Some(g) => Some(
+                g.until.as_option().and_then(|t| u64::try_from(t.seconds).ok()).context("a grant's until is a time")?,
+            ),
+            None => None,
+        };
+        let (let_go, stream) = {
+            let mut open = lock(&xc.signins);
+            let s = open.get_mut(&ic).ok_or_else(|| Refused::new("the sign-in has ended"))?;
+            s.last = now();
+            (s.control.set(until), s.stream.clone())
+        };
+        if let (Some(st), false) = (stream, let_go.is_empty()) {
+            let _ = send_all(&st, &let_go);
+        }
+        if until.is_none() {
+            signin_quiet(&xc, &ic, pane.viewers());
+        }
+        Ok(())
+    });
+    let (xi, ii) = (x.clone(), id.clone());
+    pane.on_input(move |_: &Pane, input: &PaneInput| -> anyhow::Result<()> {
+        let mut event = input.json();
+        event["kind"] = json!(input.kind);
+        if input.kind == "hint" {
+            // the app's own cap on the rate, as for the screen pane
+            if let Some(fps) = event["max_fps"].as_f64().filter(|f| *f >= 0.0) {
+                let stream = lock(&xi.signins).get(&ii).and_then(|s| s.stream.clone());
+                if let Some(st) = stream {
+                    st.send(&json!({"type": "config", "maxFps": fps.ceil().min(120.0) as u64}))?;
+                }
+            }
+            return Ok(());
+        }
+        if !matches!(input.kind.as_str(), "pointer" | "scroll" | "key" | "text") {
+            return Err(
+                Refused::new("the sign-in pane takes pointer, scroll, key and text while you control it").into()
+            );
+        }
+        // the grant first: no input without one connects anything
+        let messages = {
+            let mut open = lock(&xi.signins);
+            let s = open.get_mut(&ii).ok_or_else(|| Refused::new("the sign-in has ended"))?;
+            s.last = now();
+            let size = s.stream.as_ref().map_or(signin::VIEWPORT, |st| *lock(&st.size));
+            s.control
+                .messages(&event, size, now(), cfg!(target_os = "macos"))
+                .map_err(|e| Refused::new(e.to_string()))?
+        };
+        let stream = signin_stream(&xi, &ii).map_err(|e| Refused::new(format!("{e:#}")))?;
+        send_all(&stream, &messages)
+    });
+    let (xx, ix, pid) = (x.clone(), id.clone(), pane.id().to_string());
+    pane.on_close(move |_: &Pane, reason: &str| {
+        // closing the pane ends the sign-in, unless it's an older pane a new open replaced
+        let mine = lock(&xx.signins).get(&ix).and_then(|s| s.pane.as_ref().map(|p| p.id() == pid)).unwrap_or(false);
+        if mine {
+            signin_end(&xx, &ix, if reason.is_empty() { "closed" } else { reason }, false);
+        }
+    });
+    let site = lock(&x.signins).get(&id).map(|s| s.site.clone()).unwrap_or_default();
+    Ok(signin_opening(&site))
+}
+
+/// What the `signin` pane opens with: the page's size and rate, and `control`, so the apps offer Control on it.
+fn signin_opening(site: &str) -> PaneOpenResponse {
+    let video = Video {
+        codec: video::Codec::CODEC_MJPEG.into(),
+        width: signin::VIEWPORT.0 as i32,
+        height: signin::VIEWPORT.1 as i32,
+        fps: 10.0,
+        ..Default::default()
+    };
+    let mut answer = PaneOpenResponse::video(video).titled(&format!("Sign in to {site}"));
+    answer.control = Some(true);
+    answer
 }
 
 fn files_in(dir: &Path) -> Vec<PathBuf> {
@@ -1083,6 +1656,8 @@ fn main() -> anyhow::Result<()> {
         chrome_installing: Mutex::new(None),
         runs: Mutex::new(()),
         counter: AtomicU64::new(0),
+        signins: Mutex::new(HashMap::new()),
+        used: Mutex::new(HashMap::new()),
     });
 
     // the pinned CLI and its Chrome are fetched as soon as the extension starts, so the first call doesn't wait
@@ -1094,11 +1669,13 @@ fn main() -> anyhow::Result<()> {
             if let Err(e) = xs.cli().and_then(|_| xs.ensure_chrome()) {
                 xs.h.log(format!("{e:#}"));
             }
+            signin_leftovers(&xs);
         });
         let xl = xs_sweep.clone();
         std::thread::spawn(move || loop {
             lane_sweep(&xl);
-            std::thread::sleep(Duration::from_secs(60));
+            signin_sweep(&xl);
+            std::thread::sleep(Duration::from_secs(sweep_secs()));
         });
     });
 
@@ -1115,6 +1692,13 @@ fn main() -> anyhow::Result<()> {
         let xc = x.clone();
         ext.command(kind, move |job: &Job| f(&xc, job));
     }
+
+    let xs = x.clone();
+    ext.on(move |req: CredentialsSignInRequest| credentials_sign_in(&xs, &req));
+    let xc = x.clone();
+    ext.on(move |req: CredentialsCodeRequest| credentials_code(&xc, &req));
+    let xp = x.clone();
+    ext.pane("signin", move |pane: &Pane| signin_open(&xp, pane));
 
     let xh = x.clone();
     ext.on(move |_: HealthCheckRequest| Ok(HealthCheckResponse { parts: health(&xh), ..Default::default() }));
@@ -1140,6 +1724,13 @@ mod tests {
         assert_eq!(lane_job("Staging: sign in"), "UI test: Staging: sign in");
         let t = lane_job("Window resize + keys-smoke WINDOW");
         assert!(!t.to_lowercase().contains("window") && !t.to_lowercase().contains("keys-smoke"), "{t}");
+    }
+
+    #[test]
+    fn the_sign_in_pane_is_one_people_may_control() {
+        let a = signin_opening("stage.example.dev");
+        assert_eq!(a.control, Some(true));
+        assert_eq!(a.title.as_deref(), Some("Sign in to stage.example.dev"));
     }
 
     #[test]

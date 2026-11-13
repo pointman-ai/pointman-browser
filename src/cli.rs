@@ -180,6 +180,33 @@ pub fn envelope(ran: &Ran) -> anyhow::Result<Value> {
     }
 }
 
+/// The answer to one command sent on stdin as `batch --json --omit-command` (so its text is in no argv): its one row,
+/// `{index, success, result, error}`, as the envelope a single command prints.
+pub fn batch_envelope(ran: &Ran) -> anyhow::Result<Value> {
+    if ran.cancelled {
+        bail!("cancelled");
+    }
+    let text = String::from_utf8_lossy(&ran.stdout);
+    let row = match serde_json::from_str::<Value>(text.trim()) {
+        Ok(Value::Array(rows)) if rows.len() == 1 => rows.into_iter().next().unwrap_or_default(),
+        // a batch that couldn't start prints one envelope of its own
+        Ok(v) if v.get("success").is_some_and(Value::is_boolean) => return envelope(ran),
+        _ if ran.timed_out => bail!("agent-browser didn't answer in time and was stopped{}", tail(&ran.stderr)),
+        _ => bail!(
+            "agent-browser answered without its JSON (exit {}){}",
+            ran.code.map_or("by a signal".to_string(), |c| c.to_string()),
+            tail(&ran.stderr)
+        ),
+    };
+    let mut one = serde_json::json!({"success": row["success"].as_bool().unwrap_or(false), "data": row["result"],
+                                     "error": row["error"]});
+    if let Some(code) = row.get("code") {
+        one["code"] = code.clone();
+    }
+    let ran = Ran { code: ran.code, stdout: one.to_string().into_bytes(), ..Default::default() };
+    envelope(&ran)
+}
+
 fn tail(stderr: &[u8]) -> String {
     let s = String::from_utf8_lossy(stderr);
     let s = s.trim();
@@ -307,6 +334,11 @@ fn is_flag(a: &str) -> bool {
 
 /// The words that aren't flags or flag values, and the first flag that isn't allowed.
 fn split_words(args: &[String]) -> Result<Vec<&str>, String> {
+    Ok(word_places(args)?.into_iter().map(|i| args[i].as_str()).collect())
+}
+
+/// Where the words that aren't flags or flag values are, in `args`; or the first flag that isn't allowed.
+pub fn word_places(args: &[String]) -> Result<Vec<usize>, String> {
     let mut words = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -332,11 +364,16 @@ fn split_words(args: &[String]) -> Result<Vec<&str>, String> {
                 ));
             }
         } else {
-            words.push(a);
+            words.push(i);
         }
         i += 1;
     }
     Ok(words)
+}
+
+/// Whether agent-browser would read this word as a flag: `-x` or `--x`, not a negative number.
+pub fn reads_as_flag(a: &str) -> bool {
+    is_flag(a)
 }
 
 /// Whether the words ask for a visible window: `--headed`, `--headed=true`, `--headed true`, not `--headed=false`.
