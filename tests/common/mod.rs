@@ -50,6 +50,7 @@ case "$1" in
   eval) case "$2" in
     big) printf '{"success":true,"data":{"pad":"%s"},"error":null}\n' "$(head -c 700000 /dev/zero | tr '\0' 'x')";;
       crash) echo "thread 'main' panicked" >&2; exit 101;;
+      echo-typed) printf '{"success":true,"data":{"result":%s},"error":null}\n' "$(cat "$here/batch.stdin")";;
     *) echo '{"success":true,"data":{"result":"ok"},"error":null}';;
   esac;;
   click) echo '{"success":false,"data":null,"error":"Element not found: '"$2"'"}'; exit 1;;
@@ -58,8 +59,20 @@ case "$1" in
     if [ -f "$here/no-browser" ]; then echo '{"success":false,"data":null,"error":"No page open"}'; exit 1; fi
     if [ -n "$2" ]; then printf '\211PNG\r\n\032\nFILE' > "$2"; echo '{"success":true,"data":{"path":"'"$2"'"},"error":null}'
     else printf '\211PNG\r\n\032\nDATA' > "$here/shots/abc.png"; echo '{"success":true,"data":{"path":"'"$here"'/shots/abc.png"},"error":null}'; fi;;
-  get) echo '{"success":true,"data":{"url":"https://staging.example/"},"error":null}';;
+  get) if [ -f "$here/page.url" ]; then u=$(cat "$here/page.url"); else u="https://staging.example/"; fi
+    echo '{"success":true,"data":{"url":"'"$u"'"},"error":null}';;
   session) echo '{"success":true,"data":{"sessions":["patchbay","deskprobe"]}}';;
+  stream) p=$(cat "$here/stream.port" 2>/dev/null || echo 9)
+    echo '{"success":true,"data":{"enabled":true,"port":'"$p"',"connected":true,"screencasting":false},"error":null}';;
+  state) case "$2" in
+    save) if [ -f "$here/state.src" ]; then cp "$here/state.src" "$3"; else echo '{"cookies":[{"name":"sid","value":"cookie-v4lue-1","domain":"stage.example.dev"}],"origins":[]}' > "$3"; fi
+      echo '{"success":true,"data":{"path":"'"$3"'"},"error":null}';;
+    load) cp "$3" "$here/state.loaded"; echo "$3" > "$here/state.path"; stat -c %a "$3" > "$here/state.mode" 2>/dev/null || stat -f %Lp "$3" > "$here/state.mode"
+      echo '{"success":true,"data":{"skipped":[]},"error":null}';;
+    *) echo '{"success":false,"data":null,"error":"unknown state"}'; exit 2;;
+  esac;;
+  close) echo '{"success":true,"data":{"closed":true},"error":null}';;
+  batch) cat > "$here/batch.stdin"; printf '[{"index":0,"success":true,"result":{"typed":%s},"error":null}]\n' "$(cat "$here/batch.stdin")";;
   wait) sleep "$2"; echo '{"success":true,"data":{},"error":null}';;
   *) echo '{"success":false,"data":null,"error":"unknown command"}'; exit 2;;
 esac
@@ -231,4 +244,76 @@ pub fn part(node: &StandIn, id: &str) -> Value {
         .find(|p| p["id"] == id)
         .cloned()
         .unwrap_or_else(|| panic!("no {id} in {parts}"))
+}
+
+/// A stand-in for agent-browser's stream (its WebSocket on 127.0.0.1): its port goes where the fake's `stream status`
+/// reads it, each connection gets a 64x48 frame of a 1280x720 page every 50 ms, and the input it's sent is kept.
+pub struct FakeStream {
+    pub got: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    pub connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// A real 64x48 JPEG's first bytes are enough: the extension reads its size from the frame header.
+pub fn tiny_jpeg() -> Vec<u8> {
+    let mut j = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00];
+    j.extend([0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 48, 0x00, 64, 0x01, 0x01, 0x11, 0x00]);
+    j.extend([0xFF, 0xD9]);
+    j
+}
+
+impl FakeStream {
+    pub fn start(fake: &Fake) -> FakeStream {
+        use base64::Engine as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(fake.dir.path().join("stream.port"), port.to_string()).unwrap();
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (g, n) = (got.clone(), connections.clone());
+        std::thread::spawn(move || {
+            for tcp in listener.incoming().flatten() {
+                let (g, n) = (g.clone(), n.clone());
+                std::thread::spawn(move || {
+                    let Ok(mut ws) = tungstenite::accept(tcp) else { return };
+                    n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ws.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+                    let data = base64::engine::general_purpose::STANDARD.encode(tiny_jpeg());
+                    let frame = serde_json::json!({"type": "frame", "seq": 1, "data": data,
+                        "metadata": {"deviceWidth": 1280, "deviceHeight": 720, "timestamp": 1785038682238u64}});
+                    loop {
+                        if ws.send(tungstenite::Message::text(frame.to_string())).is_err() {
+                            return;
+                        }
+                        match ws.read() {
+                            Ok(tungstenite::Message::Text(t)) => {
+                                g.lock().unwrap().push(serde_json::from_str(t.as_str()).unwrap_or_default())
+                            }
+                            Ok(tungstenite::Message::Close(_)) => return,
+                            Ok(_) => {}
+                            Err(tungstenite::Error::Io(e))
+                                if matches!(
+                                    e.kind(),
+                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                                ) => {}
+                            Err(_) => return,
+                        }
+                    }
+                });
+            }
+        });
+        FakeStream { got, connections }
+    }
+
+    pub fn inputs(&self) -> Vec<Value> {
+        self.got.lock().unwrap().clone()
+    }
+
+    /// Waits up to 5 s for `n` inputs.
+    pub fn wait_inputs(&self, n: usize) -> Vec<Value> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.inputs().len() < n && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        self.inputs()
+    }
 }

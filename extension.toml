@@ -5,7 +5,7 @@
 [extension]
 id = "browser"
 name = "Browser"
-version = "0.1.6"
+version = "0.2.0"
 publisher = "aurelio"
 summary = "Agents drive a headless browser with agent-browser: open pages, read them, click, type and take screenshots."
 node = ">=0.4.0"
@@ -23,48 +23,18 @@ skill = "SKILLS.md"
 secrets = ["browser.*"]    # the test logins James adds with /browser add: the extension signs in with them, the agent never sees them
 network = true                   # agent-browser's pinned release and Chrome, once per version; and the pages agents open
 
-# A test login: a sign-in page and a staging-only test account, plus a Cloudflare Access service token when the site
-# sits behind Access. Each is a field of its own: the plain ones are shown as typed, and the apps seal them as one
-# vault record {"kind":"env","vars":{...}} that the extension reads. It sends the Access headers to that one origin
-# and types the password itself.
+# A test login: the person names each value (URL, EMAIL, PASSWORD, their own), each shown or hidden, and the apps seal
+# them as one vault record {"kind":"env","vars":{...},"plain":[...]} (MB-926). Or they sign in themselves in the
+# `signin` pane, and Save seals the session (URL + STATE) the same way (EXT-156). The extension signs agents in with it
+# and puts its values into their args as {{NAME}}; a hidden value never reaches an agent.
 [[credentials]]
 id = "login"
 title = "Test login"
-help = "Access only for a site behind Cloudflare Access."
+help = "Name each value (URL, EMAIL, PASSWORD), or sign in yourself in the browser pane."
 item = "browser.{label}"
 needed = 0
-
-[[credentials.fields]]
-name = "URL"
-title = "Sign-in page"
-value = 'https://\S+'
-placeholder = "https://"
-plain = true
-optional = false
-
-[[credentials.fields]]
-name = "EMAIL"
-title = "Test account email"
-plain = true
-optional = false
-
-[[credentials.fields]]
-name = "PASSWORD"
-title = "Password"
-plain = false
-optional = false
-
-[[credentials.fields]]
-name = "ACCESS_CLIENT_ID"
-title = "Cloudflare Access client ID"
-plain = true
-optional = true
-
-[[credentials.fields]]
-name = "ACCESS_CLIENT_SECRET"
-title = "Cloudflare Access client secret"
-plain = false
-optional = true
+open = true
+sign_in = true
 
 [settings]
 type = "object"
@@ -93,12 +63,12 @@ title = "Add a test login"
 params = { type = "object", properties = { name = { type = "string", description = "What to call it (stagesheep): lowercase letters, digits, . _ -" } } }
 slash = "add"
 form = "login"
-summary = "Add a test login for a site: its URL, Access token, and test account"
+summary = "Add a test login: name its values, or sign in yourself in the browser pane"
 
 [[commands]]
 kind = "browser.run"
 title = "Run agent-browser (args, agent, doing?)"
-params = { type = "object", properties = { args = { type = "array", items = { type = "string" }, description = "The words after `agent-browser`: [\"open\", \"https://example.com\"], then [\"snapshot\", \"-i\", \"-c\"], [\"click\", \"@e1\"], [\"fill\", \"@e2\", \"text\"], [\"screenshot\"]" }, agent = { type = "string", description = "Your handle: your own browser session on this machine is named for it" }, doing = { type = "string", description = "What you're doing, in a few words" }, timeout = { type = "integer", minimum = 1, maximum = 600, default = 60, description = "Seconds before it's stopped" }, login = { type = "string", description = "The label of a test login James added with `/browser add`: the extension signs your session in first, and you never see its values" } }, required = ["args", "agent"], additionalProperties = false }
+params = { type = "object", properties = { args = { type = "array", items = { type = "string" }, description = "The words after `agent-browser`: [\"open\", \"https://example.com\"], then [\"snapshot\", \"-i\", \"-c\"], [\"click\", \"@e1\"], [\"fill\", \"@e2\", \"text\"], [\"screenshot\"]" }, agent = { type = "string", description = "Your handle: your own browser session on this machine is named for it" }, doing = { type = "string", description = "What you're doing, in a few words" }, timeout = { type = "integer", minimum = 1, maximum = 600, default = 60, description = "Seconds before it's stopped" }, login = { type = "string", description = "The label of a test login James added with `/browser add`: your session is signed in first, and {{NAME}} in args is its value; you never see a hidden one" } }, required = ["args", "agent"], additionalProperties = false }
 cancellable = true
 outputs = ["image", "document"]
 slash = "run"
@@ -135,3 +105,11 @@ params = { type = "object", properties = { run = { type = "string", description 
 outputs = ["document"]
 slash = "test-finish"
 summary = "Write report.html, a still for every step, pass or fail; let go of the heavy-job lane"
+
+# Sign in yourself (EXT-156): the sign-in's own browser session (never an agent's) as mjpeg frames from agent-browser's
+# stream, while someone watches, with Control for the person who started it. credentials.sign_in answers with it.
+[[panes]]
+id = "signin"
+title = "Sign in"
+format = "video"
+opens = ["command"]
