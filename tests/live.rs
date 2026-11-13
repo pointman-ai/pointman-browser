@@ -134,19 +134,25 @@ fn signs_in_from_the_pane_and_a_run_uses_it() {
     let run = |args: serde_json::Value, login: &str| {
         node.run("browser.run", json!({"args": args, "agent": "live-test", "login": login})).unwrap().result
     };
-    let got = run(json!(["get", "text", "body"]), "live");
-    println!("signed_in: {}, url: {}", got["signed_in"], got["data"]);
-    assert_eq!(got["signed_in"], "state");
+    // later runs without the login read what the signed-in session shows (each run with it signs in again, which
+    // reopens the login's URL)
+    let bare =
+        |args: serde_json::Value| node.run("browser.run", json!({"args": args, "agent": "live-test"})).unwrap().result;
+    // Save kept the origin as URL, so the sign-in lands on httpbin's home page, which never lists cookies: the run
+    // goes on to /cookies, which does
+    let opened = run(json!(["open", "https://httpbin.org/cookies"]), "live");
+    println!("signed_in: {}, opened: {}", opened["signed_in"], opened["data"]["url"]);
+    assert_eq!(opened["signed_in"], "state");
+    assert_eq!(opened["ok"], true, "{opened}");
+    let got = bare(json!(["get", "text", "body"]));
+    println!("cookies page: {}", got["data"]);
     assert!(got.to_string().contains("pb_live"), "httpbin shows the cookie the pane set: {got}");
 
     // 3. a hidden value, on stdin, on its own site; scrubbed from what echoes it
     let filled = run(json!(["fill", "input[name=custname]", "{{PASSWORD}}"]), "form");
     println!("fill: {filled}");
     assert_eq!(filled["ok"], true, "{filled}");
-    // read back in later runs, without the login (each run with it signs in again, which reloads the page): the
-    // session has had the value, so it's scrubbed all the same
-    let bare =
-        |args: serde_json::Value| node.run("browser.run", json!({"args": args, "agent": "live-test"})).unwrap().result;
+    // read back without the login: the session has had the value, so it's scrubbed all the same
     let echo = bare(json!(["get", "value", "input[name=custname]"]));
     println!("get value: {echo}");
     assert!(!echo.to_string().contains("live-hidden-123") && echo.to_string().contains("***"));
