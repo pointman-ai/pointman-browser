@@ -54,6 +54,7 @@ case "$1" in
     *) echo '{"success":true,"data":{"result":"ok"},"error":null}';;
   esac;;
   click) echo '{"success":false,"data":null,"error":"Element not found: '"$2"'"}'; exit 1;;
+  fill|type) echo '{"success":true,"data":{},"error":null}';;
   screenshot)
     mkdir -p "$here/shots"
     if [ -f "$here/no-browser" ]; then echo '{"success":false,"data":null,"error":"No page open"}'; exit 1; fi
