@@ -15,9 +15,6 @@ pub const VARS_MAX: usize = 24;
 /// The shortest hidden value: scrubbing a shorter one would blank those letters all over an answer.
 pub const MIN_SECRET: usize = 8;
 
-/// The names browser 0.1.6's fixed form showed as typed: a record sealed before `plain` existed has these shown.
-const LEGACY_PLAIN: [&str; 3] = ["URL", "EMAIL", "ACCESS_CLIENT_ID"];
-
 /// A value's name, as the form makes it: `^[A-Z][A-Z0-9_]{0,63}$`.
 pub fn valid_name(name: &str) -> bool {
     name.len() <= 64
@@ -97,8 +94,8 @@ impl Login {
             }
         }
         let plain: BTreeSet<String> = match &v["plain"] {
-            // sealed before `plain`: browser 0.1.6's form, whose URL, EMAIL and client id were shown as typed
-            Value::Null => LEGACY_PLAIN.iter().map(|s| s.to_string()).collect(),
+            // no `plain`: every value is hidden (MB-926 §2)
+            Value::Null => BTreeSet::new(),
             Value::Array(names) => names
                 .iter()
                 .map(|n| n.as_str().map(String::from).context("the login's plain is a list of names"))
@@ -333,15 +330,12 @@ mod tests {
     }
 
     #[test]
-    fn a_name_not_in_plain_is_hidden_and_a_record_without_plain_is_0_1_6s() {
+    fn a_name_not_in_plain_is_hidden_and_a_record_without_plain_is_all_hidden() {
         let r = json!({"kind": "env", "vars": full()}).to_string();
         let l = Login::parse(&r).unwrap();
-        for k in SHOWN {
-            assert!(!l.hidden(k), "{k} was shown as typed in 0.1.6's form");
-        }
-        assert!(l.hidden("PASSWORD") && l.hidden("ACCESS_CLIENT_SECRET"));
+        assert!(l.names().iter().all(|k| l.hidden(k)), "no plain: every value is hidden");
         let l = Login::parse(&rec(full(), &[])).unwrap();
-        assert!(SHOWN.iter().all(|k| l.hidden(k)), "an empty plain: every value is hidden");
+        assert!(l.names().iter().all(|k| l.hidden(k)), "an empty plain: every value is hidden");
     }
 
     #[test]

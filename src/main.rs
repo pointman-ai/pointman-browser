@@ -1211,6 +1211,11 @@ fn the_form(form: &str) -> anyhow::Result<()> {
 fn credentials_sign_in(x: &Ext, req: &CredentialsSignInRequest) -> anyhow::Result<CredentialsSignInResponse> {
     the_form(&req.form)?;
     login::item_name(&req.label)?;
+    // only the person it's for may watch and drive it: a sign-in with no person is refused, never open to anyone
+    let person = req.person.as_option().map(|p| (p.id.clone(), p.name.clone())).unwrap_or_default();
+    if person.0.is_empty() && person.1.is_empty() {
+        bail!("a sign-in is for one person, and this one came with none");
+    }
     let id = req.session.as_option().map(|s| s.id.clone()).unwrap_or_default();
     let session = signin::session_name(&id)?;
     let start = req.start.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -1264,7 +1269,6 @@ fn credentials_sign_in(x: &Ext, req: &CredentialsSignInRequest) -> anyhow::Resul
             return Err(e.context("starting the sign-in"));
         }
     };
-    let person = req.person.as_option().map(|p| (p.id.clone(), p.name.clone())).unwrap_or_default();
     let s = SignIn {
         session: session.clone(),
         site,
@@ -1415,8 +1419,7 @@ fn signin_open(x: &Arc<Ext>, pane: &Pane) -> anyhow::Result<PaneOpenResponse> {
                 "no such sign-in on this machine: it ended, or never started here. Start it again from the form",
             )
         })?;
-        let anyone = s.person.0.is_empty() && s.person.1.is_empty();
-        if !anyone && !same_person(&s.person, &viewer) {
+        if !same_person(&s.person, &viewer) {
             return Err(Refused::new("this sign-in is someone else's").into());
         }
         if let Some(old) = s.pane.replace(pane.clone()) {

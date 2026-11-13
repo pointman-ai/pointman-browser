@@ -137,6 +137,25 @@ fn someone_elses_sign_in_doesnt_open() {
 }
 
 #[test]
+fn a_sign_in_for_no_one_is_refused_before_it_starts() {
+    let fake = Fake::new();
+    let _stream = FakeStream::start(&fake);
+    let node = node(&fake, json!({}));
+    for person in [None, Some(json!({})), Some(json!({"id": "", "name": ""}))] {
+        let mut req = json!({"form": "login", "label": "x", "session": {"id": "sin_9"}, "start": "https://a.example/"});
+        if let Some(p) = person {
+            req["person"] = p;
+        }
+        let e = node.call("credentials.sign_in", req).map_err(|e| format!("{e:#}")).unwrap_err();
+        assert!(e.contains("one person"), "{e}");
+    }
+    assert!(fake.calls_of("open").is_empty(), "no session was started");
+    assert!(!signin_dir(&node, "sin_9").exists());
+    let e = node.open_pane("signin", json!({"session": "sin_9"})).err().expect("refused");
+    assert!(format!("{e:#}").contains("no such sign-in"), "{e:#}");
+}
+
+#[test]
 fn save_seals_the_session_as_the_login_and_ends_it() {
     let fake = Fake::new();
     let _stream = FakeStream::start(&fake);

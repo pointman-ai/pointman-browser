@@ -56,9 +56,8 @@ hidden, and the apps seal them as one vault record, `browser.<label>`:
 {"kind": "env", "vars": {"URL": "https://stage.example.dev", "EMAIL": "bot@example.dev", "PASSWORD": "…"}, "plain": ["EMAIL", "URL"]}
 ```
 
-`plain` lists the shown names; any other is hidden. A record from 0.1.6's form has no `plain`: its `URL`, `EMAIL`
-and `ACCESS_CLIENT_ID` are shown, as they were then. Hidden values are at least 8 characters, so scrubbing one
-never blanks short words in an answer.
+`plain` lists the shown names; any other is hidden, and a record with no `plain` is all hidden. Hidden values are at
+least 8 characters, so scrubbing one never blanks short words in an answer.
 
 - **Signing in** (`src/login.rs`), in this order:
   1. `STATE` (a saved session): written to a private file in the job's folder, `state load`, the file deleted, then
@@ -73,7 +72,11 @@ never blanks short words in an answer.
   `type`, `keyboard type` or `keyboard inserttext`, only while the page's origin is the record's `URL` origin (checked
   with `get url` just before), and that command goes on agent-browser's stdin (`batch --json --omit-command`), never
   its argv. An unknown name, `{{NAME}}` without a login, and a value that would read as a flag are refused by name.
-  Hidden values are scrubbed from every answer, error and overflow file.
+  Hidden values are scrubbed from every answer, error and overflow file, with two limits:
+  - Only exact copies are caught. A page holds what was typed into it, so `eval` can read a typed value back changed
+    (base64, reversed, split) and the answer carries it.
+  - Which hidden values a session has typed is kept in memory. After the extension restarts, answers from a session
+    that typed one before aren't scrubbed of it.
 
 ## Sign in yourself
 
@@ -84,7 +87,8 @@ For sites a form can't sign in to (codes, SSO, emailed links): the form's Sign-i
    that name (`browser.run` refuses it). It answers `{"pane": {"open": "signin", "target": {"session": "<id>"}},
    "prompt": "…"}`.
 2. **The `signin` pane** (video, mjpeg): frames from agent-browser's stream (its WebSocket on 127.0.0.1), only while
-   a viewer is attached. Only the person who started the sign-in can open it.
+   a viewer is attached. Only the person who started the sign-in can open it; a sign-in that comes with no person is
+   refused.
 3. **Control:** while the node's grant holds, EXT-57's inputs go to the stream's input: `pointer` (0–1 of the
    picture) as mouse events, `scroll` as the wheel (`dy > 0` up), `key` (a macOS key code) as a key with its DOM code,
    and `text` as typed characters. On Linux, cmd is Ctrl, so copy, paste and select-all work. When control ends,

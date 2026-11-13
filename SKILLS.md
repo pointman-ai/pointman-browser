@@ -70,7 +70,7 @@ page with a still for every step, pass or fail.
 
 A person adds a test login for a site with `/browser add <label>`. Either they name its values (`URL`, `EMAIL`,
 `PASSWORD`, or names of their own), each shown or hidden, or they **sign in themselves** in the browser pane and tap
-Save, which keeps the signed-in session. You never see a hidden value. Pass the label as `login` to `browser.run` or
+Save, which keeps the signed-in session. Hidden values aren't shown to you. Pass the label as `login` to `browser.run` or
 `browser.test_start`:
 
 - **Your session is signed in before your first command:** a saved session first, else `URL` + `EMAIL` (or
@@ -81,7 +81,8 @@ Save, which keeps the signed-in session. You never see a hidden value. Pass the 
   - A hidden value goes only in the text of `fill`, `type`, `keyboard type` or `keyboard inserttext`, and only while
     the page is on the login's `URL` site: never in a URL or a selector. A login with no `URL` gets no hidden value.
   - A name the login hasn't got is refused, and the error lists the names it has.
-- **Hidden values are scrubbed** from every answer (`***`).
+- **Hidden values are scrubbed** from every answer (`***`), exact copies only. Never read a typed one back (`eval`,
+  `get value`) or change it to get it past the scrub.
 - **A site with codes, SSO or emailed links:** ask your person to add the login with `/browser add` and **Sign in
   yourself**. Then use its label as above.
 - A label that doesn't exist, or a login that isn't usable, is an error that names the label and the key, never a
