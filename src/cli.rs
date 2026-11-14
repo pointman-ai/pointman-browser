@@ -222,7 +222,7 @@ pub fn session_name(handle: Option<&str>) -> Option<String> {
 }
 
 /// The commands browser.run passes on. Anything else, including what a later agent-browser adds, is refused.
-const COMMANDS: [&str; 30] = [
+const COMMANDS: [&str; 31] = [
     "open",
     "snapshot",
     "click",
@@ -253,6 +253,7 @@ const COMMANDS: [&str; 30] = [
     "errors",
     "highlight",
     "mouse",
+    "set",
 ];
 /// Flags that stand alone.
 const BOOL_FLAGS: [&str; 15] = [
@@ -419,6 +420,10 @@ pub fn refused(args: &[String], work: &Path, allowed: &dyn Fn(&Path) -> anyhow::
     if command == "get" && words.get(1) == Some(&"cdp-url") {
         return Some("`get cdp-url` isn't allowed: it hands out a way into the browser.".to_string());
     }
+    // `set headers` could replace what a login sends, and `set credentials` puts a password in the job's args
+    if command == "set" && !matches!(words.get(1), Some(&("viewport" | "device" | "media"))) {
+        return Some("`set` takes viewport, device or media only.".to_string());
+    }
     if command == "screenshot" {
         let rest = &words[1..];
         let path = match rest {
@@ -557,6 +562,11 @@ mod tests {
             &["wait", "--download", "/tmp/x"],
             &["get", "cdp-url"],
             &["batch", "open x"],
+            &["set"],
+            &["set", "headers", "{}"],
+            &["set", "credentials", "a", "b"],
+            &["set", "geo", "1", "2"],
+            &["set", "offline", "on"],
         ] {
             assert!(deny(bad).is_some(), "{bad:?}");
         }
@@ -576,6 +586,10 @@ mod tests {
             &["screenshot", "#main", "shots/a.png"],
             &["eval", "document.title"],
             &["close"],
+            &["set", "viewport", "390", "844"],
+            &["set", "viewport", "390", "844", "3"],
+            &["set", "device", "iPhone 15 Pro"],
+            &["set", "media", "dark", "reduced-motion"],
             &["open", "https://example.com", "--json", "--headed=false"],
         ] {
             assert_eq!(deny(ok), None, "{ok:?}");
