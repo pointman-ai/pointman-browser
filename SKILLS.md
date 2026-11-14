@@ -31,8 +31,8 @@ the open sessions.
 5. **A still:** `["screenshot"]` comes back as a PNG output; the answer names it. `["screenshot", "--full"]` is the
    whole page.
 
-- **Several steps at once:** `batch`, so they run in one call.
-- **The full guide:** `["skills", "get", "core"]`. Flags: `["<command>", "--help"]`.
+- **A phone's layout:** `["set", "viewport", "390", "844"]` or `["set", "device", "iPhone 15 Pro"]`, and
+  `["set", "media", "dark"]` for dark mode. It lasts for your session: `["set", "viewport", "1280", "720"]` puts it back.
 - **Every call answers with agent-browser's JSON:** `ok` (and its own `success`), then `data` or `error.message`, plus
   `text`, a line about it. A failed click or a missing element is an answer to branch on. A job only fails when
   agent-browser couldn't run at all.

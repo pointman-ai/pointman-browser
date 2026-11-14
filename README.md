@@ -42,7 +42,8 @@ lane let go, when that agent starts another.
   only fails when agent-browser can't run, crashes, times out, or the call isn't allowed.
 - **An allowlist, not a denylist:** only open, snapshot, click, dblclick, fill, type, press, keyboard, hover, focus,
   select, check, uncheck, scroll, scrollintoview, wait, get (not `cdp-url`), is, find, tab, back, forward, reload,
-  screenshot, eval, close (not `--all`), console, errors, highlight and mouse, with the flags they take. Anything
+  screenshot, eval, close (not `--all`), console, errors, highlight, mouse and set (only `viewport`, `device` and
+  `media`), with the flags they take. Anything
   else, including what a later agent-browser adds, is refused. `file:`, `chrome:`, `javascript:` and `data:` URLs are
   refused, and a screenshot's path must be inside the job's own folder. `--headed` needs the "Visible window" setting.
 - **Screenshots are posted.** A `screenshot` comes back as a PNG output, and the answer names the file.
