@@ -5,7 +5,7 @@
 [extension]
 id = "browser"
 name = "Browser"
-version = "0.1.8"
+version = "0.1.9"
 publisher = "aurelio"
 summary = "Agents drive a headless browser with agent-browser: open pages, read them, click, type and take screenshots."
 node = ">=0.4.0"
