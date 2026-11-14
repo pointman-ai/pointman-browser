@@ -14,20 +14,43 @@ use serde_json::{json, Value};
 /// A folder with a `nix` that logs each call's words to `nix.log` and makes the out-link's `bin/chromium`, or, when
 /// `fail`, prints a reason and exits 1.
 fn stand_in_nix(fail: bool) -> tempfile::TempDir {
+    stand_in_nix_with(fail, false)
+}
+
+/// The same; when `gated`, each call waits in nix, after logging its words, until the test makes the file `gate`
+/// beside it: the build holds the extension's lock until then.
+fn stand_in_nix_with(fail: bool, gated: bool) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let body = if fail {
         "echo 'error: unable to download cache.nixos.org' >&2\nexit 1\n".to_string()
     } else {
         "prev=\"\"\nfor a in \"$@\"; do\n  if [ \"$prev\" = \"--out-link\" ]; then mkdir -p \"$a/bin\"; : > \"$a/bin/chromium\"; chmod +x \"$a/bin/chromium\"; fi\n  prev=\"$a\"\ndone\n".to_string()
     };
+    let gate = if gated {
+        format!(
+            "n=0\nwhile [ ! -e \"{d}/gate\" ] && [ $n -lt 1500 ]; do sleep 0.02; n=$((n+1)); done\n",
+            d = dir.path().display()
+        )
+    } else {
+        String::new()
+    };
     let script = format!(
-        "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done >> \"{d}/nix.log\"\necho ---- >> \"{d}/nix.log\"\n{body}",
+        "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done >> \"{d}/nix.log\"\necho ---- >> \"{d}/nix.log\"\n{gate}{body}",
         d = dir.path().display()
     );
     let p = dir.path().join("nix");
     std::fs::write(&p, script).unwrap();
     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
     dir
+}
+
+/// Waits up to 10 s for `done`, or fails naming `what`.
+fn until(what: &str, done: impl Fn() -> bool) {
+    let by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !done() {
+        assert!(std::time::Instant::now() < by, "{what}: not after 10 s");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 fn nix_calls(dir: &Path) -> Vec<Vec<String>> {
@@ -134,4 +157,21 @@ fn on_nixos_a_chromium_on_the_path_is_never_used_instead() {
     assert!(open(&node).is_err(), "the failed build stays failed");
     assert!(fake.calls_of("open").is_empty(), "agent-browser never got the PATH's chromium");
     assert_eq!(part(&node, "chrome")["state"], "STATE_FAILING");
+}
+
+#[test]
+fn while_nix_builds_health_says_it_is_building_never_ok() {
+    let fake = Fake::new();
+    let nix = stand_in_nix_with(true, true);
+    let node = nixos(&fake, nix.path(), json!({}));
+    // the build at start is in nix, holding the lock, until the gate opens
+    until("the build at start reaches nix", || nix_calls(nix.path()).len() == 1);
+    let chrome = part(&node, "chrome");
+    assert_ne!(chrome["state"], "STATE_OK", "{chrome}");
+    assert!(chrome["why"].as_str().unwrap_or("").contains("building Chromium"), "{chrome}");
+    std::fs::write(nix.path().join("gate"), "").unwrap();
+    until("the build fails", || part(&node, "chrome")["state"] == "STATE_FAILING");
+    let why = part(&node, "chrome")["why"].as_str().unwrap_or("").to_string();
+    assert!(why.contains("unable to download cache.nixos.org"), "{why}");
+    assert_eq!(nix_calls(nix.path()).len(), 1, "nothing else ran nix");
 }

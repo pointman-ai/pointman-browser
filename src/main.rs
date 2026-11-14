@@ -204,14 +204,15 @@ impl Ext {
     }
 
     /// NixOS can't run a downloaded Chrome and the person installs nothing: build nixpkgs' Chromium into the state
-    /// folder the first time, unless the `chrome` setting names one or the out-link is there.
-    fn ensure_nix_chrome(&self) -> anyhow::Result<()> {
+    /// folder the first time, unless the `chrome` setting names one or the out-link is there. A call always tries; the
+    /// build at start only on a machine nothing has tried yet (`nix_build_due`).
+    fn ensure_nix_chrome(&self, at_start: bool) -> anyhow::Result<()> {
         let set = self.setting_set("chrome");
         if set || !is_nixos() || self.nix_chrome().is_some() {
             return Ok(());
         }
         let mut last = lock(&self.chrome_installing);
-        if self.nix_chrome().is_some() {
+        if self.nix_chrome().is_some() || !nix_build_due(at_start, &last) {
             return Ok(());
         }
         let nix =
@@ -257,7 +258,12 @@ impl Ext {
 
     /// The Chrome agent-browser downloads (`agent-browser install`), unless a system one is used or it's there.
     fn ensure_chrome(&self) -> anyhow::Result<()> {
-        self.ensure_nix_chrome()?;
+        self.fetch_chrome(false)
+    }
+
+    /// `ensure_chrome`, from a call or, ahead of the first call, at start.
+    fn fetch_chrome(&self, at_start: bool) -> anyhow::Result<()> {
+        self.ensure_nix_chrome(at_start)?;
         if self.system_chrome().is_some() || std::env::var_os("POINTMAN_BROWSER_CLI").is_some() {
             return Ok(());
         }
@@ -287,6 +293,13 @@ impl Ext {
         *last = Some(why.clone());
         bail!(why)
     }
+}
+
+/// Whether a try at the NixOS build runs nix, under the build lock with the last build's error. A call always does:
+/// it retries a failed build. The build at start doesn't once one has failed, so a second nix run of minutes never
+/// follows straight after a failed one, and the next call still retries it.
+fn nix_build_due(at_start: bool, last: &Option<String>) -> bool {
+    !at_start || last.is_none()
 }
 
 /// The nixpkgs revision Chromium is built from on NixOS: nixos-unstable's Hydra-built head on 2026-11-07
@@ -1016,7 +1029,8 @@ fn health(x: &Ext) -> Vec<Part> {
             )
         }
     } else if std::env::var_os("POINTMAN_BROWSER_CLI").is_some()
-        && !matches!(lock_try(&x.chrome_installing), Some(Some(_)))
+        // a held lock is a build or download going on: shown as that below, never as the stand-in's OK
+        && matches!(lock_try(&x.chrome_installing), Some(None))
     {
         part("chrome", "browser", "Chrome", State::Ok, vec![], "stand-in".into())
     } else {
@@ -1091,7 +1105,7 @@ fn main() -> anyhow::Result<()> {
         let xs_sweep = xs.clone();
         let xs = xs.clone();
         std::thread::spawn(move || {
-            if let Err(e) = xs.cli().and_then(|_| xs.ensure_chrome()) {
+            if let Err(e) = xs.cli().and_then(|_| xs.fetch_chrome(true)) {
                 xs.h.log(format!("{e:#}"));
             }
         });
@@ -1171,6 +1185,14 @@ mod nix_tests {
         );
         assert_eq!(chrome_text(&json!({"kind": "downloaded", "version": "157.0.8103.38"})), "Chrome 157.0.8103.38");
         assert_eq!(chrome_text(&json!({"kind": "none"})), "Chrome not installed yet");
+    }
+
+    #[test]
+    fn a_call_always_tries_the_build_and_the_start_only_when_nothing_has_failed() {
+        let failed = Some("nix couldn't build Chromium (exit 1): offline".to_string());
+        assert!(nix_build_due(false, &None) && nix_build_due(false, &failed), "a call retries");
+        assert!(nix_build_due(true, &None), "the start builds on a machine nothing has tried");
+        assert!(!nix_build_due(true, &failed), "nor straight after a failed build: no second nix run");
     }
 
     #[test]
