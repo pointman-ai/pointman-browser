@@ -55,6 +55,8 @@ struct Ext {
     /// The logins each agent's session has used, by label, in memory only: a hidden value typed into a page stays
     /// there, so every later answer from that session is scrubbed of it too, with or without `login`.
     used: Mutex<HashMap<String, HashMap<String, Login>>>,
+    /// When this run began: a sign-in folder newer than that is this run's, never a stopped one's leftover.
+    started: SystemTime,
 }
 
 impl Ext {
@@ -1373,6 +1375,10 @@ fn signin_sweep(x: &Ext) {
 fn signin_leftovers(x: &Ext) {
     let Ok(entries) = std::fs::read_dir(x.state().join("signins")) else { return };
     for e in entries.flatten() {
+        // a sign-in can start before this sweep runs (it waits for the CLI and Chrome): that one is this run's
+        if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t >= x.started) {
+            continue;
+        }
         if let Ok(session) = std::fs::read_to_string(e.path().join("session")) {
             if signin::is_signin_session(session.trim()) {
                 let _ = signin_call(x, session.trim(), &["close"], QUICK);
@@ -1672,6 +1678,7 @@ fn main() -> anyhow::Result<()> {
         counter: AtomicU64::new(0),
         signins: Mutex::new(HashMap::new()),
         used: Mutex::new(HashMap::new()),
+        started: SystemTime::now(),
     });
 
     // the pinned CLI and its Chrome are fetched as soon as the extension starts, so the first call doesn't wait
