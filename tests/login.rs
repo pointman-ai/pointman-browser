@@ -1,5 +1,6 @@
-//! A test login the agent never sees: the extension reads the vault item, sends the Access headers to one origin,
-//! types the password on stdin, and nothing of it comes back in an answer, a job's params or a run's files.
+//! A test login the agent never sees: the extension reads the vault item (`vars` + `plain`), signs the session in
+//! (STATE, then URL + EMAIL/USERNAME + PASSWORD, then URL alone), sends the Access headers to one origin, puts
+//! `{{NAME}}`s in, and nothing hidden comes back in an answer, a job's params or a run's files.
 
 mod common;
 
@@ -15,7 +16,12 @@ fn record(access: bool) -> String {
         vars["ACCESS_CLIENT_ID"] = "abc.access".into();
         vars["ACCESS_CLIENT_SECRET"] = "s3cr3t-token".into();
     }
-    json!({"kind": "env", "vars": vars}).to_string()
+    json!({"kind": "env", "vars": vars, "plain": ["ACCESS_CLIENT_ID", "EMAIL", "URL"]}).to_string()
+}
+
+/// A record of the person's own values.
+fn own(vars: serde_json::Value, plain: &[&str]) -> String {
+    json!({"kind": "env", "vars": vars, "plain": plain}).to_string()
 }
 
 /// The hidden values: the email and client id are plain, shown as typed, and the stand-in echoes them.
@@ -46,6 +52,24 @@ fn a_login_signs_the_session_in_and_nothing_comes_back() {
         .unwrap();
     assert_eq!(done.result["ok"], true);
     assert_eq!(done.result["login"], "stagesheep");
+    assert_eq!(done.result["signed_in"], "password");
+    let names: Vec<_> = done.result["vars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| (v["name"].as_str().unwrap(), v["hidden"] == true))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            ("ACCESS_CLIENT_ID", false),
+            ("ACCESS_CLIENT_SECRET", true),
+            ("EMAIL", false),
+            ("PASSWORD", true),
+            ("URL", false)
+        ],
+        "the answer lists the names, hidden ones marked"
+    );
 
     let words: Vec<_> = fake.calls().iter().map(|c| c.args.join(" ")).collect();
     assert!(words[0].contains("--config"), "the Access headers ride in a config file: {words:?}");
@@ -133,7 +157,7 @@ fn a_run_with_a_login_holds_its_session_and_the_lane() {
 #[test]
 fn a_missing_or_bad_login_stops_before_anything_is_typed() {
     let fake = Fake::new();
-    let bad = record(true).replace("\"EMAIL\":\"bot@example.com\",", "");
+    let bad = record(true).replace("https://stage.example.dev/sign-in", "http://stage.example.dev/sign-in");
     let node = node_with_secrets(&fake, json!({}), &[("browser.broken", &bad)]);
     for (label, why) in [("nope", "no login named nope"), ("broken", "isn't usable"), ("../x", "label")] {
         let e =
@@ -182,4 +206,164 @@ fn one_access_field_alone_is_refused_before_anything_is_typed() {
     assert!(e.contains("isn't usable") && e.contains("ACCESS_CLIENT_ID"), "{e}");
     assert!(leaks(&e).is_empty(), "{e}");
     assert!(fake.calls_of("auth").is_empty() && fake.calls_of("open").is_empty());
+}
+
+#[test]
+fn a_saved_session_is_loaded_from_a_private_file_then_the_site_opened() {
+    let fake = Fake::new();
+    let state =
+        json!({"cookies": [{"name": "sid", "value": "cookie-v4lue-1", "domain": "stage.example.dev"}], "origins": []});
+    let rec = own(
+        json!({"URL": "https://stage.example.dev", "STATE": state.to_string(), "PASSWORD": "hunter2 pass",
+                         "EMAIL": "bot@example.com"}),
+        &["EMAIL", "URL"],
+    );
+    let node = node_with_secrets(&fake, json!({}), &[("browser.saved", &rec)]);
+    let done = node.run("browser.run", json!({"args": ["snapshot"], "agent": "patchbay", "login": "saved"})).unwrap();
+    assert_eq!(done.result["signed_in"], "state", "STATE comes first, before a password");
+    let words: Vec<_> = fake.calls().iter().map(|c| c.args.join(" ")).collect();
+    assert!(words[0].starts_with("--session patchbay --json state load "), "{words:?}");
+    assert!(words[1].ends_with("open https://stage.example.dev"), "{words:?}");
+    assert!(fake.calls_of("auth").is_empty(), "no password sign-in: {words:?}");
+    let dir = fake.dir.path();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(dir.join("state.loaded")).unwrap()).unwrap(),
+        state
+    );
+    assert_eq!(std::fs::read_to_string(dir.join("state.mode")).unwrap().trim(), "600");
+    let path = std::fs::read_to_string(dir.join("state.path")).unwrap();
+    assert!(!std::path::Path::new(path.trim()).exists(), "the state file is deleted straight after");
+    let hidden =
+        done.result["vars"].as_array().unwrap().iter().find(|v| v["name"] == "STATE").unwrap()["hidden"].clone();
+    assert_eq!(hidden, true);
+    let answer = done.result.to_string();
+    assert!(!answer.contains("cookie-v4lue-1") && leaks(&answer).is_empty(), "{answer}");
+    for c in fake.calls() {
+        assert!(!c.args.join(" ").contains("cookie-v4lue-1"), "the state is in no argv");
+    }
+}
+
+#[test]
+fn a_url_alone_is_opened_and_nothing_else() {
+    let fake = Fake::new();
+    let node = node_with_secrets(
+        &fake,
+        json!({}),
+        &[("browser.docs", &own(json!({"URL": "https://docs.example.dev/start"}), &["URL"]))],
+    );
+    let done = node.run("browser.run", json!({"args": ["snapshot"], "agent": "patchbay", "login": "docs"})).unwrap();
+    assert_eq!(done.result["signed_in"], "open");
+    let words: Vec<String> = fake.calls().iter().map(|c| c.word()).collect();
+    assert_eq!(words, ["open", "snapshot"]);
+}
+
+#[test]
+fn a_hidden_value_goes_in_on_stdin_and_only_on_the_logins_site() {
+    let fake = Fake::new();
+    let node = node_with_secrets(&fake, json!({}), &[("browser.stagesheep", &record(false))]);
+    std::fs::write(fake.dir.path().join("page.url"), "https://stage.example.dev/sign-in?next=/").unwrap();
+    let done = node
+        .run(
+            "browser.run",
+            json!({"args": ["fill", "@e2", "{{PASSWORD}}"], "agent": "patchbay", "login": "stagesheep"}),
+        )
+        .unwrap();
+    assert_eq!(done.result["ok"], true, "{}", done.result);
+    let stdin = std::fs::read_to_string(fake.dir.path().join("batch.stdin")).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&stdin).unwrap(), json!([["fill", "@e2", "hunter2 pass"]]));
+    let batch = fake.calls_of("batch");
+    assert_eq!(batch.len(), 1);
+    assert!(batch[0].args.contains(&"--omit-command".to_string()));
+    for c in fake.calls() {
+        assert!(!c.args.join(" ").contains("hunter2"), "the password is in no argv: {:?}", c.args);
+    }
+    // the fake echoes what it typed: scrubbed
+    let answer = done.result.to_string();
+    assert!(leaks(&answer).is_empty() && answer.contains("***"), "{answer}");
+
+    // another site: refused, and nothing typed
+    std::fs::write(fake.dir.path().join("page.url"), "https://evil.example/login").unwrap();
+    std::fs::remove_file(fake.dir.path().join("batch.stdin")).unwrap();
+    let e = node
+        .run(
+            "browser.run",
+            json!({"args": ["type", "#pw", "{{PASSWORD}}"], "agent": "patchbay", "login": "stagesheep"}),
+        )
+        .unwrap_err();
+    let e = format!("{e:#}");
+    assert!(e.contains("only on https://stage.example.dev") && e.contains("https://evil.example"), "{e}");
+    assert!(!fake.dir.path().join("batch.stdin").exists(), "nothing was typed");
+    assert!(leaks(&e).is_empty());
+}
+
+#[test]
+fn shown_values_go_anywhere_in_argv() {
+    let fake = Fake::new();
+    let node = node_with_secrets(&fake, json!({}), &[("browser.stagesheep", &record(false))]);
+    let done = node
+        .run(
+            "browser.run",
+            json!({"args": ["fill", "#email", "{{EMAIL}}"], "agent": "patchbay", "login": "stagesheep"}),
+        )
+        .unwrap();
+    assert_eq!(done.result["ok"], true);
+    let last = fake.calls().last().unwrap().args.join(" ");
+    assert!(last.ends_with("fill #email bot@example.com"), "{last}");
+    assert!(fake.calls_of("batch").is_empty(), "a shown value needs no stdin");
+}
+
+#[test]
+fn a_bad_name_stops_the_run_before_the_browser() {
+    let fake = Fake::new();
+    let node = node_with_secrets(
+        &fake,
+        json!({}),
+        &[("browser.stagesheep", &record(false)), ("browser.nourl", &own(json!({"API_KEY": "k3y-k3y-k3y"}), &[]))],
+    );
+    for (args, login, why) in [
+        (json!(["fill", "@e1", "{{OTP}}"]), Some("stagesheep"), "no OTP"),
+        (json!(["open", "https://stage.example.dev/?p={{PASSWORD}}"]), Some("stagesheep"), "{{PASSWORD}} is hidden"),
+        (json!(["fill", "{{PASSWORD}}", "x"]), Some("stagesheep"), "never in a URL or a selector"),
+        (json!(["fill", "@e1", "{{API_KEY}}"]), Some("nourl"), "no URL"),
+        (json!(["fill", "@e1", "{{EMAIL}}"]), None, "pass login"),
+    ] {
+        let mut params = json!({"args": args, "agent": "patchbay"});
+        if let Some(l) = login {
+            params["login"] = json!(l);
+        }
+        let e = format!("{:#}", node.run("browser.run", params).unwrap_err());
+        assert!(e.contains(why), "{e} should say {why}");
+        assert!(leaks(&e).is_empty() && !e.contains("k3y-k3y"), "{e}");
+    }
+    assert!(fake.calls().is_empty(), "nothing reached the browser: {:?}", fake.calls());
+}
+
+#[test]
+fn an_agent_never_gets_a_sign_ins_session() {
+    let fake = Fake::new();
+    let node = node(&fake, json!({}));
+    for agent in ["signin-sin_1", "SignIn-x"] {
+        let e = format!("{:#}", node.run("browser.run", json!({"args": ["snapshot"], "agent": agent})).unwrap_err());
+        assert!(e.contains("sign-in pane's"), "{e}");
+    }
+    assert!(fake.calls().is_empty());
+}
+
+#[test]
+fn a_later_run_without_the_login_is_scrubbed_too() {
+    let fake = Fake::new();
+    let node = node_with_secrets(&fake, json!({}), &[("browser.stagesheep", &record(false))]);
+    std::fs::write(fake.dir.path().join("page.url"), "https://stage.example.dev/sign-in").unwrap();
+    node.run(
+        "browser.run",
+        json!({"args": ["fill", "@e2", "{{PASSWORD}}"], "agent": "patchbay", "login": "stagesheep"}),
+    )
+    .unwrap();
+    // the page still holds what was typed: the fake's `eval echo-typed` gives it back, as `get value` would
+    let later = node.run("browser.run", json!({"args": ["eval", "echo-typed"], "agent": "patchbay"})).unwrap();
+    let text = later.result.to_string();
+    assert!(leaks(&text).is_empty() && text.contains("***"), "{text}");
+    // another agent's session never had the login: its answers aren't touched
+    let other = node.run("browser.run", json!({"args": ["eval", "echo-typed"], "agent": "deskprobe"})).unwrap();
+    assert!(other.result.to_string().contains("hunter2 pass"), "only the session that had it is scrubbed");
 }

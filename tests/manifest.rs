@@ -50,29 +50,20 @@ fn the_manifest_keeps_to_cores_limits() {
         "item {item} breaks core's pattern"
     );
     assert!(!rest.contains("{label}") || rest == "{label}", "{{label}} is the whole part after the first dot");
-    // core's rules for a form with fields (MB-912): no value, placeholder or sign_in; 1-12 fields, unique names
-    for k in ["value", "placeholder", "sign_in"] {
-        assert!(form.get(k).is_none(), "a form with fields has no {k}");
+    // an open form (MB-926): the person names the values, so no value, placeholder or fields of its own; it signs in
+    // too (EXT-156), and its help is one line
+    assert_eq!(form["open"].as_bool(), Some(true), "the person names the values");
+    assert_eq!(form["sign_in"].as_bool(), Some(true), "and can sign in themselves in the pane");
+    for k in ["value", "placeholder", "fields"] {
+        assert!(form.get(k).is_none(), "an open form for /browser add has no {k}");
     }
-    let fields = form["fields"].as_array().unwrap();
-    assert!((1..=12).contains(&fields.len()));
-    let names: Vec<_> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
-    assert_eq!(names, browser::login::KEYS, "the fields are the keys the code reads");
-    for f in fields {
-        let name = f["name"].as_str().unwrap();
-        assert!(name.starts_with(|c: char| c.is_ascii_uppercase()) && name.len() <= 64, "{name}");
-        assert!(name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'), "{name}");
-        assert!((1..=80).contains(&chars(&f["title"])), "{name}'s title");
-        assert!(f.get("placeholder").is_none_or(|p| chars(p) <= 80));
-    }
-    let flag = |n: &str, k: &str| {
-        let f = fields.iter().find(|f| f["name"].as_str() == Some(n)).unwrap();
-        f.get(k).and_then(|v| v.as_bool()).unwrap_or(false)
-    };
-    assert!(flag("URL", "plain") && flag("EMAIL", "plain") && flag("ACCESS_CLIENT_ID", "plain"), "shown as typed");
-    assert!(!flag("PASSWORD", "plain") && !flag("ACCESS_CLIENT_SECRET", "plain"), "hidden");
-    assert!(flag("ACCESS_CLIENT_ID", "optional") && flag("ACCESS_CLIENT_SECRET", "optional"));
-    assert!(!flag("URL", "optional") && !flag("EMAIL", "optional") && !flag("PASSWORD", "optional"));
+    assert!(!form["help"].as_str().unwrap().contains('\n'), "help is one line");
+    // the pane a sign-in answers with: video, opened by the command's answer
+    let panes = m["panes"].as_array().unwrap();
+    let signin = panes.iter().find(|p| p["id"].as_str() == Some("signin")).expect("a signin pane");
+    assert_eq!(signin["format"].as_str(), Some("video"));
+    assert!((1..=60).contains(&chars(&signin["title"])));
+    assert_eq!(signin["opens"].as_array().unwrap(), &[toml::Value::from("command")]);
     let add = m["commands"].as_array().unwrap().iter().find(|c| c["slash"].as_str() == Some("add")).unwrap();
     assert_eq!(add["form"].as_str(), form["id"].as_str(), "`/browser add` opens the form");
     let skill = m["behavior"]["skill"].as_str().unwrap();
