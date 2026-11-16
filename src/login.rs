@@ -75,6 +75,12 @@ pub fn item_name(label: &str) -> anyhow::Result<String> {
     Ok(format!("browser.{label}"))
 }
 
+/// Whether the record is one value named after its item, as the vault's one-value sheet seals it: never the form.
+pub fn one_value(text: &str, item: &str) -> bool {
+    serde_json::from_str::<Value>(text.trim())
+        .is_ok_and(|v| v["vars"].as_object().is_some_and(|o| o.len() == 1 && o.contains_key(item)))
+}
+
 impl Login {
     /// The vault record `{"kind":"env","vars":{…},"plain":[…]}`: names as the form makes them, text values, at most
     /// VARS_MAX. Errors name keys, never values.
