@@ -158,13 +158,20 @@ fn a_run_with_a_login_holds_its_session_and_the_lane() {
 fn a_missing_or_bad_login_stops_before_anything_is_typed() {
     let fake = Fake::new();
     let bad = record(true).replace("https://stage.example.dev/sign-in", "http://stage.example.dev/sign-in");
-    let node = node_with_secrets(&fake, json!({}), &[("browser.broken", &bad)]);
-    for (label, why) in [("nope", "no login named nope"), ("broken", "isn't usable"), ("../x", "label")] {
+    // what the vault's one-value sheet seals: one value named after the item
+    let sheet = json!({"kind": "env", "vars": {"browser.sheet": "sheet-value-1"}}).to_string();
+    let node = node_with_secrets(&fake, json!({}), &[("browser.broken", &bad), ("browser.sheet", &sheet)]);
+    for (label, why) in [
+        ("nope", "no login named nope"),
+        ("broken", "isn't usable"),
+        ("sheet", "saved as one value, not with its form: James adds it again with `/browser add sheet`"),
+        ("../x", "label"),
+    ] {
         let e =
             node.run("browser.run", json!({"args": ["snapshot"], "agent": "patchbay", "login": label})).unwrap_err();
         let e = format!("{e:#}");
         assert!(e.contains(why), "{e}");
-        assert!(leaks(&e).is_empty());
+        assert!(leaks(&e).is_empty() && !e.contains("sheet-value-1"), "{e}");
     }
     assert!(fake.calls_of("auth").is_empty() && fake.calls_of("open").is_empty(), "nothing reached the browser");
 }

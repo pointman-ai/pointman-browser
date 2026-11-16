@@ -432,6 +432,9 @@ fn load_login(x: &Ext, label: &str) -> anyhow::Result<Login> {
     let text =
         x.h.secret(&item)
             .map_err(|_| anyhow!("there is no login named {label}: James adds one with `/browser add {label}`"))?;
+    if login::one_value(&text, &item) {
+        bail!("the login {label} was saved as one value, not with its form: James adds it again with `/browser add {label}`");
+    }
     Login::parse(&text).map_err(|e| anyhow!("the login {label} isn't usable: {e}"))
 }
 
