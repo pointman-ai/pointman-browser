@@ -55,7 +55,9 @@ struct Ext {
     /// The logins each agent's session has used, by label, in memory only: a hidden value typed into a page stays
     /// there, so every later answer from that session is scrubbed of it too, with or without `login`.
     used: Mutex<HashMap<String, HashMap<String, Login>>>,
-    /// When this run began: a sign-in folder newer than that is this run's, never a stopped one's leftover.
+    /// When this run began, less a second: a sign-in folder newer than that is this run's, never a stopped one's
+    /// leftover. File times come from a coarser clock (Linux's lags by up to a tick), so a folder made just after the
+    /// start can read as just before it.
     started: SystemTime,
 }
 
@@ -1681,7 +1683,7 @@ fn main() -> anyhow::Result<()> {
         counter: AtomicU64::new(0),
         signins: Mutex::new(HashMap::new()),
         used: Mutex::new(HashMap::new()),
-        started: SystemTime::now(),
+        started: SystemTime::now() - Duration::from_secs(1),
     });
 
     // the pinned CLI and its Chrome are fetched as soon as the extension starts, so the first call doesn't wait
